@@ -208,6 +208,14 @@ void Il2CppAttach() {
     }
 }
 
+void Il2CppThreadAttach() {
+    if (!Il2CppIsReady()) return;
+    if (il2cpp_domain_get && il2cpp_thread_attach) {
+        void* domain = il2cpp_domain_get();
+        if (domain) il2cpp_thread_attach(domain);
+    }
+}
+
 bool Il2CppIsReady() {
     if (!g_bindComplete) Il2CppAttach();
     return g_attached;

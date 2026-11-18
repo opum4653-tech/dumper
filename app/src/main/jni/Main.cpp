@@ -64,10 +64,7 @@ bool ResolveTouchBridge() {
     if (!g_Il2CppReady.load()) return false;
 
     // Attach current thread to IL2CPP runtime before querying symbols
-    if (il2cpp_domain_get && il2cpp_thread_attach) {
-        void* domain = il2cpp_domain_get();
-        if (domain) il2cpp_thread_attach(domain);
-    }
+    Il2CppThreadAttach();
 
     static const char* kImages[] = {
         "UnityEngine.InputLegacyModule.dll",
@@ -128,12 +125,9 @@ void PumpTouch(ImGuiIO& io) {
     }
 
     static bool s_threadAttached = false;
-    if (!s_threadAttached && il2cpp_domain_get && il2cpp_thread_attach) {
-        void* domain = il2cpp_domain_get();
-        if (domain) {
-            il2cpp_thread_attach(domain);
-            s_threadAttached = true;
-        }
+    if (!s_threadAttached) {
+        Il2CppThreadAttach();
+        s_threadAttached = true;
     }
 
     static bool s_touching = false;

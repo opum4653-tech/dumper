@@ -12,6 +12,10 @@
 // records the module load bias. Safe to call repeatedly; the work happens once.
 void Il2CppAttach();
 
+// Attaches the calling thread to the IL2CPP domain so managed methods
+// and runtime APIs can be invoked safely without assertions or crashes.
+void Il2CppThreadAttach();
+
 // True once the core API (domain, assemblies, image, class) is bound.
 bool Il2CppIsReady();
 
