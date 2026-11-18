@@ -18,7 +18,6 @@
 #include "../../Core/JsonWriter.h"
 #include "../../Core/MetadataParser.h"
 #include "../../Core/ElfReconstructor.h"
-#include "../../KittyMemory/KittyMemory.h"
 
 #ifndef ANDROID_LOG_INFO
 #define ANDROID_LOG_INFO 4

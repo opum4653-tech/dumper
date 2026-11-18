@@ -1,43 +1,77 @@
-#ifndef MEMORY_UTILS_H
-#define MEMORY_UTILS_H
+#ifndef NINMODS_CORE_MEMORYUTILS_H
+#define NINMODS_CORE_MEMORYUTILS_H
+
+// Module base resolution for the current process.
+//
+// Primary path is /proc/self/maps: the load bias of a shared object is the start
+// of its lowest mapping, and that is what every address in the module is relative
+// to. The pathname field is compared on its basename so both
+// "/data/app/.../lib/arm64/libil2cpp.so" and a bare "libil2cpp.so" match.
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <unistd.h>
 
-// Module base resolver for the current process.
-// Primary path: /proc/self/maps (no dependency on a linker wrapper).
-// The first read-executable map matching the name is the load bias.
+namespace memutils {
+
+// Returns the basename pointer of a /proc/self/maps pathname (7th field).
+inline const char* PathBasename(const char* path) {
+    if (!path) return "";
+    const char* slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+inline bool BasenameEquals(const char* path, const char* moduleName) {
+    const char* base = PathBasename(path);
+    return strcmp(base, moduleName) == 0;
+}
+
+} // namespace memutils
+
+// Lowest mapping address of the named module, or 0 when it is not mapped.
 inline uintptr_t GetModuleBase(const char* moduleName) {
     if (!moduleName || moduleName[0] == '\0') return 0;
 
     FILE* fp = fopen("/proc/self/maps", "r");
     if (!fp) return 0;
 
-    char line[512];
-    uintptr_t result = 0;
-    while (fgets(line, sizeof(line), fp)) {
-        if (!strstr(line, moduleName)) continue;
+    char line[1024];
+    uintptr_t lowest = 0;
 
+    while (fgets(line, sizeof(line), fp)) {
         uintptr_t start = 0;
         char perms[5] = {0};
-        if (sscanf(line, "%lx-%*lx %4s", &start, perms) != 2) continue;
+        // address perms offset dev inode pathname
+        if (sscanf(line, "%lx-%*lx %4s %*s %*s %*s", &start, perms) < 2) continue;
 
-        // Load bias is the start of the first mapping that owns the file.
-        if (strchr(perms, 'x') || start != 0) {
-            result = start;
-            break;
+        // Pathname is everything after the inode field; locate it by skipping
+        // the first five whitespace-separated tokens instead of relying on %s
+        // into a fixed buffer, since paths can carry spaces.
+        const char* p = line;
+        int fields = 0;
+        while (*p && fields < 5) {
+            while (*p == ' ' || *p == '\t') ++p;
+            while (*p && *p != ' ' && *p != '\t' && *p != '\n') ++p;
+            ++fields;
         }
+        while (*p == ' ' || *p == '\t') ++p;
+        if (!*p || *p == '\n') continue; // anonymous mapping, no file backing
+
+        if (!memutils::BasenameEquals(p, moduleName)) continue;
+
+        if (lowest == 0 || start < lowest) lowest = start;
     }
+
     fclose(fp);
-    return result;
+    return lowest;
 }
 
-// Overload used by the lifecycle bootstrap (pid is always self here).
+// Same resolver, keyed on a pid. This library only ever inspects itself, so any
+// pid other than the current one has no resolvable address space here.
 inline uintptr_t get_module_base(pid_t pid, const char* moduleName) {
     if (pid != getpid()) return 0;
     return GetModuleBase(moduleName);
 }
 
-#endif // MEMORY_UTILS_H
+#endif // NINMODS_CORE_MEMORYUTILS_H

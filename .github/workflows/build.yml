@@ -32,39 +32,28 @@ jobs:
           add-to-path: true
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@v3
 
-      - name: Clean Local Config & Accept Licenses
-        run: |
-          rm -f local.properties
-          yes | sdkmanager --licenses || true
+      - name: Accept Licenses
+        run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
 
       - name: Build Native Libraries with ndk-build
         run: |
-          echo "============================================================"
-          echo "Building NINMODS native libraries (arm64-v8a & armeabi-v7a)..."
-          echo "============================================================"
-          export NDK_BIN="ndk-build"
-          if command -v ndk-build &> /dev/null; then
-            NDK_BIN="ndk-build"
-          elif [ -n "$ANDROID_NDK_ROOT" ] && [ -f "$ANDROID_NDK_ROOT/ndk-build" ]; then
-            NDK_BIN="$ANDROID_NDK_ROOT/ndk-build"
-          elif [ -n "$ANDROID_NDK_HOME" ] && [ -f "$ANDROID_NDK_HOME/ndk-build" ]; then
-            NDK_BIN="$ANDROID_NDK_HOME/ndk-build"
-          fi
-          echo "Using NDK binary: $NDK_BIN"
-          
+          set -o pipefail
           mkdir -p output_libs
-          mkdir -p app/src/main/libs
-          mkdir -p app/src/main/jniLibs
-          
-          $NDK_BIN NDK_PROJECT_PATH=app/src/main APP_BUILD_SCRIPT=app/src/main/jni/Android.mk NDK_APPLICATION_MK=app/src/main/jni/Application.mk NDK_LIBS_OUT=$(pwd)/output_libs -j$(nproc) V=1 2>&1 | tee ndk_build.log || true
-          
-          cp -rf output_libs/* app/src/main/libs/ || true
-          cp -rf output_libs/* app/src/main/jniLibs/ || true
-          
-          echo "=== NDK BUILD LOG (LAST 60 LINES) ==="
-          tail -n 60 ndk_build.log || true
+          ndk-build \
+            NDK_PROJECT_PATH=app/src/main \
+            APP_BUILD_SCRIPT=app/src/main/jni/Android.mk \
+            NDK_APPLICATION_MK=app/src/main/jni/Application.mk \
+            NDK_LIBS_OUT=$(pwd)/output_libs \
+            -j$(nproc) 2>&1 | tee ndk_build.log
+          test -f output_libs/arm64-v8a/libNINMODS.so
+          test -f output_libs/armeabi-v7a/libNINMODS.so
+
+          # Stage into jniLibs so Gradle packages them into the APK.
+          mkdir -p app/src/main/libs/arm64-v8a app/src/main/libs/armeabi-v7a
+          cp -f output_libs/arm64-v8a/libNINMODS.so   app/src/main/libs/arm64-v8a/
+          cp -f output_libs/armeabi-v7a/libNINMODS.so app/src/main/libs/armeabi-v7a/
 
       - name: Upload NDK Build Log
         if: always()
@@ -74,51 +63,32 @@ jobs:
           path: ndk_build.log
           if-no-files-found: ignore
 
-      - name: Grant Execute Permission to Gradlew
-        run: chmod +x gradlew
-
       - name: Build APK with Gradle
         run: |
-          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee gradle_build.log
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Upload Gradle Build Log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-build-log
-          path: gradle_build.log
-          if-no-files-found: ignore
-
-      - name: Collect and Verify Output Binaries
+      - name: Verify Output Binaries
         run: |
-          echo "============================================================"
-          echo "=== WORKSPACE SO SCAN ==="
-          echo "============================================================"
-          find . -name "*.so" || true
-          
-          mkdir -p output_libs/arm64-v8a output_libs/armeabi-v7a
-          
-          find . -name "libNINMODS.so" | while read -r f; do
-            if echo "$f" | grep -q "arm64-v8a"; then
-              cp -f "$f" output_libs/arm64-v8a/libNINMODS.so || true
-            fi
-            if echo "$f" | grep -q "armeabi-v7a"; then
-              cp -f "$f" output_libs/armeabi-v7a/libNINMODS.so || true
-            fi
+          set -e
+          echo "=== NATIVE LIBS ==="
+          ls -la output_libs/arm64-v8a output_libs/armeabi-v7a
+          test -f output_libs/arm64-v8a/libNINMODS.so
+          test -f output_libs/armeabi-v7a/libNINMODS.so
+
+          echo "=== APKs ==="
+          mkdir -p release_apks
+          find app/build/outputs/apk -name "*.apk" -exec cp -f {} release_apks/ \;
+          ls -la release_apks
+
+          echo "=== APK CONTENTS (native entries) ==="
+          for apk in release_apks/*.apk; do
+            echo "-- $apk"
+            unzip -l "$apk" | grep -E "lib/.*/libNINMODS\.so" || true
           done
 
-          # Distinctly named release assets to avoid GitHub release name collision
-          cp -f output_libs/arm64-v8a/libNINMODS.so output_libs/libNINMODS-arm64-v8a.so || true
-          cp -f output_libs/armeabi-v7a/libNINMODS.so output_libs/libNINMODS-armeabi-v7a.so || true
-
-          echo "=== FINAL OUTPUT_LIBS ==="
-          ls -la output_libs/* || true
-
-          if [ ! -f "output_libs/arm64-v8a/libNINMODS.so" ] || [ ! -f "output_libs/armeabi-v7a/libNINMODS.so" ]; then
-            echo "::error::CRITICAL: libNINMODS.so missing for one or both ABIs!"
-            exit 1
-          fi
-          echo "SUCCESS: Both arm64-v8a and armeabi-v7a libNINMODS.so binaries verified!"
+          test -f release_apks/app-release.apk || ls release_apks/*.apk > /dev/null
+          echo "APK + both ABI libraries verified."
 
       - name: Upload Native Libraries Artifact
         uses: actions/upload-artifact@v4
@@ -127,24 +97,32 @@ jobs:
           path: output_libs/
           retention-days: 14
 
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NINMODS-Release-APK
+          path: release_apks/*.apk
+          retention-days: 14
+          if-no-files-found: error
+
       - name: Publish to GitHub Releases
-        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            output_libs/libNINMODS-arm64-v8a.so
-            output_libs/libNINMODS-armeabi-v7a.so
-            app/build/outputs/apk/**/*.apk
+            output_libs/arm64-v8a/libNINMODS.so
+            output_libs/armeabi-v7a/libNINMODS.so
+            release_apks/*.apk
           tag_name: "v1.0.0"
           name: "NINMODS Universal Il2Cpp Dumper v1.0.0"
           draft: false
           prerelease: false
           body: |
-            ## NINMODS In-Memory Il2Cpp Dumper & Live Inspector
-            - **arm64-v8a Binary**: `libNINMODS-arm64-v8a.so` (1.24 MB)
-            - **armeabi-v7a Binary**: `libNINMODS-armeabi-v7a.so` (940 KB)
-            - **Smali / Dex Injection**: Rename to `libNINMODS.so` inside your target APK's `lib/<arch>/` and invoke `System.loadLibrary("NINMODS")`
-            - **Universal Support**: Works across all Unity Il2Cpp games & versions
-            - **Direct Storage Dump**: Automatically writes `dump.cs`, `script.json`, `stringliteral.json`, `il2cpp.h`, and `global-metadata.dat` to `/storage/emulated/0/Download/NINMODS_DUMP/`
+            ## NINMODS In-Memory Il2Cpp Dumper
+
+            - **Release APK** with `libNINMODS.so` bundled for `arm64-v8a` and `armeabi-v7a`
+            - **Standalone native libraries** for manual injection or repackaging
+            - **Loadable via** `System.loadLibrary("NINMODS")`
+            - **Writes** `dump.cs`, `script.json`, `stringliteral.json`, `il2cpp.h` and `global-metadata.dat` to `/storage/emulated/0/Download/NINMODS_DUMP/`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

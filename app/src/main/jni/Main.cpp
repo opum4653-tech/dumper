@@ -1,4 +1,4 @@
-// Main.cpp — NINMODS in-memory Il2Cpp dumper.
+// Main.cpp - NINMODS in-memory Il2Cpp dumper.
 // Target: Android (arm64-v8a / armeabi-v7a), NDK r21e, C++17.
 // Entry points: JNI_OnLoad (System.loadLibrary) and a DT_NEEDED constructor.
 
@@ -33,7 +33,7 @@ std::mutex g_RenderMutex;
 static bool g_IsSetup = false;
 
 // ---------------------------------------------------------------------------
-// UnityEngine.Input bridge — resolved through il2cpp, no hook collisions.
+// UnityEngine.Input bridge - resolved through il2cpp, no hook collisions.
 // Layout matches UnityEngine.Touch as returned by Input.GetTouch(int).
 // ---------------------------------------------------------------------------
 struct UnityTouch {
