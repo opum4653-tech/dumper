@@ -34,17 +34,17 @@ inline bool TryInitIl2Cpp() {
 
     Il2CppAttach();
     MetadataParser::Located loc;
-    bool ready = Il2CppIsReady() || MetadataParser::Locate(loc);
-    if (!ready) {
+    const bool apiReady = Il2CppIsReady();
+    const bool metadataReady = !apiReady && MetadataParser::Locate(loc);
+    if (!apiReady && !metadataReady) {
         return false;
     }
 
     SafeMemory::Refresh();
     g_Il2CppReady.store(true, std::memory_order_release);
-    Logger::Log("il2cpp ready: base 0x%lx, assemblies %zu, enumeration %s",
-                (unsigned long)Il2CppGetBase(),
-                Il2CppGetAssemblyCount(),
-                Il2CppEnumerationMode());
+    Logger::Log("ready: api=%d metadata=%d base 0x%lx",
+                (int)apiReady, (int)metadataReady,
+                (unsigned long)Il2CppGetBase());
 
     const char* missing = Il2CppMissingApis();
     if (missing && missing[0]) {

@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <chrono>
 
 #include "Il2Cpp.h"
 #include "Il2Cpp/Il2CppApiTable.h"
@@ -37,7 +38,8 @@ namespace {
 NINMODS_IL2CPP_API_LIST(NINMODS_API_STORAGE)
 #undef NINMODS_API_STORAGE
 
-uintptr_t  g_base = 0;
+uintptr_t  g_base = 0;        // load bias: runtime_address = g_base + vaddr
+uintptr_t  g_moduleBase = 0;  // lowest mapping: where the ELF header actually sits
 bool       g_attached = false;      // every required export bound
 bool       g_bindComplete = false;  // the bind pass actually ran to completion
 std::mutex g_attachMutex;
@@ -56,12 +58,11 @@ std::map<const void*, std::vector<const void*>> g_imageClasses;
 // 2 = class_for_each, 3 = reflection.
 int g_enumMode = 0;
 
-const char* kCoreApi[] = {
-    "il2cpp_domain_get",
-    "il2cpp_domain_get_assemblies",
-    "il2cpp_assembly_get_image",
-    "il2cpp_image_get_name",
-};
+// Set when per-image attribution was impossible: g_allClasses then holds every
+// class once, and exactly one image is allowed to expose that list. Returning it
+// from every image would emit the entire class set once per assembly.
+bool g_globalListOnly = false;
+const void* g_globalListOwner = nullptr;
 
 bool CoreBound() {
     return il2cpp_domain_get && il2cpp_domain_get_assemblies &&
@@ -102,8 +103,23 @@ bool PrepareReflection() {
     b.loadMethod  = il2cpp_class_get_method_from_name((void*)assemblyClass, "Load", 1);
     b.typesMethod = il2cpp_class_get_method_from_name((void*)assemblyClass, "GetTypes", 0);
 
-    if (b.loadMethod)  b.loadPointer  = *(void**)b.loadMethod;
-    if (b.typesMethod) b.typesPointer = *(void**)b.typesMethod;
+    // MethodInfo's first field is methodPointer in every published layout. Read
+    // it through SafeMemory so a layout surprise fails the route instead of
+    // taking the process down.
+    if (b.loadMethod) {
+        void* code = nullptr;
+        if (SafeMemory::Read((uintptr_t)b.loadMethod, &code, sizeof(code)) && code &&
+            SafeMemory::IsExecutable((uintptr_t)code)) {
+            b.loadPointer = code;
+        }
+    }
+    if (b.typesMethod) {
+        void* code = nullptr;
+        if (SafeMemory::Read((uintptr_t)b.typesMethod, &code, sizeof(code)) && code &&
+            SafeMemory::IsExecutable((uintptr_t)code)) {
+            b.typesPointer = code;
+        }
+    }
 
     return b.loadPointer && b.typesPointer;
 }
@@ -115,6 +131,7 @@ bool PrepareReflection() {
 // ---------------------------------------------------------------------------
 void Il2CppSetBase(uintptr_t base) { g_base = base; }
 uintptr_t Il2CppGetBase() { return g_base; }
+uintptr_t Il2CppGetModuleBase() { return g_moduleBase; }
 
 void Il2CppAttach() {
     std::lock_guard<std::mutex> lock(g_attachMutex);
@@ -143,6 +160,8 @@ void Il2CppAttach() {
         Dl_info dli;
         if (anchor && dladdr(anchor, &dli) && dli.dli_fbase) {
             const uintptr_t lowest = (uintptr_t)dli.dli_fbase;
+            g_moduleBase = lowest;
+
             ElfImage::Info info;
             if (ElfImage::Parse(lowest, info)) {
                 g_base = (uintptr_t)info.loadBias;
@@ -331,16 +350,27 @@ bool BuildClassesViaForEach() {
     }
 
     if (il2cpp_class_get_image) {
+        size_t attributed = 0;
         for (const void* klass : collected) {
             const void* image = il2cpp_class_get_image((void*)klass);
             if (!image) continue;
             g_imageClasses[image].push_back(klass);
+            ++attributed;
+        }
+        if (attributed == 0 && !g_imageClasses.empty()) {
+            g_globalListOnly = true;
+            g_globalListOwner = g_imageClasses.begin()->first;
         }
         return true;
     }
 
     if (!il2cpp_class_from_name || !il2cpp_class_get_name || !il2cpp_class_get_namespace) {
-        // No attribution possible; the dump will iterate the global list only.
+        // No attribution possible. The list is still real, so it is handed out
+        // exactly once through g_globalListOwner instead of once per assembly.
+        if (!g_imageClasses.empty()) {
+            g_globalListOnly = true;
+            g_globalListOwner = g_imageClasses.begin()->first;
+        }
         return true;
     }
 
@@ -356,6 +386,21 @@ bool BuildClassesViaForEach() {
             }
         }
     }
+
+    // class_from_name may resolve to nothing on a build that renames or trims
+    // types. Fall back to the single-owner handoff rather than losing the dump.
+    bool anyAttributed = false;
+    for (const auto& pair : g_imageClasses) {
+        if (!pair.second.empty()) { anyAttributed = true; break; }
+    }
+    if (!anyAttributed && !g_imageClasses.empty()) {
+        g_globalListOnly = true;
+        g_globalListOwner = g_imageClasses.begin()->first;
+        __android_log_print(ANDROID_LOG_WARN, NINMODS_TAG,
+                            "class_for_each: per-image attribution failed, "
+                            "emitting %zu classes once under one image",
+                            collected.size());
+    }
     return true;
 }
 
@@ -366,7 +411,9 @@ bool BuildClassesViaReflection() {
     if (!il2cpp_class_from_system_type || !il2cpp_string_new) return false;
 
     const ReflectionBridge& bridge = Reflection();
-    typedef void* (*LoadFn)(void*, Il2CppString*, void*);
+    // Assembly.Load(string) is static: (Il2CppString*, const MethodInfo*).
+    // GetTypes() is an instance method: (this, const MethodInfo*).
+    typedef void* (*LoadFn)(Il2CppString*, void*);
     typedef Il2CppArray<void*>* (*GetTypesFn)(void*, void*);
 
     const size_t asmCount = Il2CppGetAssemblyCount();
@@ -387,7 +434,7 @@ bool BuildClassesViaReflection() {
         Il2CppString* managedName = (Il2CppString*)il2cpp_string_new(simpleName.c_str());
         if (!managedName) continue;
 
-        void* reflectionAssembly = ((LoadFn)bridge.loadPointer)(nullptr, managedName, nullptr);
+        void* reflectionAssembly = ((LoadFn)bridge.loadPointer)(managedName, nullptr);
         if (!reflectionAssembly) continue;
 
         Il2CppArray<void*>* reflectionTypes = ((GetTypesFn)bridge.typesPointer)(reflectionAssembly, nullptr);
@@ -397,8 +444,16 @@ bool BuildClassesViaReflection() {
         const uintptr_t length = reflectionTypes->max_length;
         if (length == 0 || length > 500000) continue;
 
+        // The element array is only readable through SafeMemory: an unexpected
+        // array layout would otherwise dereference a bad pointer.
+        std::vector<void*> elements(length);
+        if (!SafeMemory::Read((uintptr_t)reflectionTypes->vector, elements.data(),
+                              length * sizeof(void*))) {
+            continue;
+        }
+
         for (uintptr_t i = 0; i < length; ++i) {
-            void* reflectionType = reflectionTypes->vector[i];
+            void* reflectionType = elements[i];
             if (!reflectionType) continue;
             void* klass = il2cpp_class_from_system_type(reflectionType);
             if (!klass) continue;
@@ -415,17 +470,34 @@ void EnsureClassCache() {
     std::lock_guard<std::mutex> lock(g_cacheMutex);
     if (g_allClassesBuilt) return;
 
-    g_allClassesBuilt = true;   // set first: the builders below fill the vectors
+    // A failed pass is retried, because the overlay can render before the game
+    // has loaded its assemblies. Each success is cheap to detect and each failure
+    // is expensive (a reflection route walks every assembly), so the retry is
+    // rate limited: one attempt per second at most.
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point s_lastAttempt{};
+    const Clock::time_point now = Clock::now();
+    if (s_lastAttempt.time_since_epoch().count() != 0 &&
+        (now - s_lastAttempt) < std::chrono::seconds(1)) {
+        return;
+    }
+    s_lastAttempt = now;
+
     g_allClasses.clear();
     g_imageClasses.clear();
+    g_globalListOnly = false;
+    g_globalListOwner = nullptr;
 
-    if (BuildClassesViaImageApi())      { g_enumMode = 1; return; }
-    if (BuildClassesViaForEach())       { g_enumMode = 2; return; }
-    if (BuildClassesViaReflection())    { g_enumMode = 3; return; }
+    // The flag is only set once a route actually produced classes. An early call
+    // would otherwise pin the cache to "no route" for the rest of the process and
+    // the dump would report zero classes forever.
+    if (BuildClassesViaImageApi())      { g_enumMode = 1; g_allClassesBuilt = true; return; }
+    if (BuildClassesViaForEach())       { g_enumMode = 2; g_allClassesBuilt = true; return; }
+    if (BuildClassesViaReflection())    { g_enumMode = 3; g_allClassesBuilt = true; return; }
 
     g_enumMode = 0;
-    __android_log_print(ANDROID_LOG_ERROR, NINMODS_TAG,
-                        "no class enumeration route available");
+    __android_log_print(ANDROID_LOG_WARN, NINMODS_TAG,
+                        "no class enumeration route available yet; will retry");
 }
 
 } // namespace
@@ -434,22 +506,29 @@ size_t Il2CppImageGetClassCount(const void* image) {
     if (!image || !Il2CppIsReady()) return 0;
     EnsureClassCache();
 
-    auto it = g_imageClasses.find(image);
-    if (it != g_imageClasses.end()) return it->second.size();
+    // When per-image attribution failed the buckets exist but are empty, so the
+    // lookup below would report 0 for the owner too and the whole class set
+    // would be dropped. The global-list handoff is therefore checked first.
+    if (g_globalListOnly) {
+        return (image == g_globalListOwner) ? g_allClasses.size() : 0;
+    }
 
-    // Fall back to the global list when attribution was not possible.
-    return g_allClasses.size();
+    auto it = g_imageClasses.find(image);
+    return (it != g_imageClasses.end()) ? it->second.size() : 0;
 }
 
 const void* Il2CppImageGetClass(const void* image, size_t index) {
     if (!image || !Il2CppIsReady()) return nullptr;
     EnsureClassCache();
 
-    auto it = g_imageClasses.find(image);
-    if (it != g_imageClasses.end()) {
-        return (index < it->second.size()) ? it->second[index] : nullptr;
+    if (g_globalListOnly) {
+        if (image != g_globalListOwner) return nullptr;
+        return (index < g_allClasses.size()) ? g_allClasses[index] : nullptr;
     }
-    return (index < g_allClasses.size()) ? g_allClasses[index] : nullptr;
+
+    auto it = g_imageClasses.find(image);
+    if (it == g_imageClasses.end()) return nullptr;
+    return (index < it->second.size()) ? it->second[index] : nullptr;
 }
 
 bool Il2CppCanEnumerateClasses() {
@@ -557,6 +636,10 @@ const char* Il2CppFieldGetName(const void* field) {
 size_t Il2CppFieldGetOffset(const void* field) {
     if (!field || !il2cpp_field_get_offset) return 0;
     return il2cpp_field_get_offset((void*)field);
+}
+
+bool Il2CppFieldOffsetAvailable() {
+    return il2cpp_field_get_offset != nullptr;
 }
 
 const void* Il2CppFieldGetType(const void* field) {

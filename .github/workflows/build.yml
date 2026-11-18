@@ -116,13 +116,24 @@ jobs:
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
+      - name: Stage Per-ABI Release Assets
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -e
+          mkdir -p release_libs
+          cp -f output_libs/arm64-v8a/libNINMODS.so   release_libs/libNINMODS-arm64-v8a.so
+          cp -f output_libs/armeabi-v7a/libNINMODS.so release_libs/libNINMODS-armeabi-v7a.so
+          ls -la release_libs
+          test -f release_libs/libNINMODS-arm64-v8a.so
+          test -f release_libs/libNINMODS-armeabi-v7a.so
+
       - name: Publish to GitHub Releases
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            output_libs/arm64-v8a/libNINMODS.so
-            output_libs/armeabi-v7a/libNINMODS.so
+            release_libs/libNINMODS-arm64-v8a.so
+            release_libs/libNINMODS-armeabi-v7a.so
             release_apks/*.apk
           tag_name: ${{ steps.release_tag.outputs.tag }}
           name: "NINMODS Universal Il2Cpp Dumper ${{ steps.release_tag.outputs.tag }}"

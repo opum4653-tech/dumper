@@ -28,6 +28,9 @@ inline bool LoadNinLogoTexture() {
     g_NinLogoWidth = width;
     g_NinLogoHeight = height;
 
+    GLint lastTexture = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &lastTexture);
+
     glGenTextures(1, &g_NinLogoTexture);
     glBindTexture(GL_TEXTURE_2D, g_NinLogoTexture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -35,6 +38,7 @@ inline bool LoadNinLogoTexture() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    glBindTexture(GL_TEXTURE_2D, lastTexture);
     stbi_image_free(data);
     return true;
 }

@@ -37,35 +37,21 @@ static bool g_imGuiReady = false;
 static std::mutex g_renderMutex;
 
 // ---------------------------------------------------------------------------
-// UnityEngine.Input bridge. Layout matches UnityEngine.Touch as returned by
-// Input.GetTouch(int); only the fields the overlay reads are declared.
+// UnityEngine.Input bridge. Reads mousePosition (Vector3) and touchCount/GetMouseButton.
 // ---------------------------------------------------------------------------
-struct UnityTouch {
-    int32_t m_FingerId;
-    float   m_Position_x;
-    float   m_Position_y;
-    float   m_RawPosition_x;
-    float   m_RawPosition_y;
-    float   m_PositionDelta_x;
-    float   m_PositionDelta_y;
-    float   m_TimeDelta;
-    int32_t m_TapCount;
-    int32_t m_Phase;
-    float   m_Pressure;
-    float   m_MaximumPossiblePressure;
-    int32_t m_Type;
-    float   m_AltitudeAngle;
-    float   m_AzimuthAngle;
-    float   m_Radius;
-    float   m_RadiusVariance;
+struct UnityVector3 {
+    float x;
+    float y;
+    float z;
 };
 
 namespace {
 
 struct TouchBridge {
-    void* touchCount = nullptr;
-    void* getTouch   = nullptr;
-    bool  resolved   = false;
+    void* touchCount     = nullptr;
+    void* mousePosition  = nullptr;
+    void* getMouseButton = nullptr;
+    bool  resolved       = false;
 };
 
 TouchBridge& Touch() {
@@ -78,6 +64,12 @@ bool ResolveTouchBridge() {
     if (bridge.resolved) return true;
     if (!g_Il2CppReady.load()) return false;
 
+    // Attach current thread to IL2CPP runtime before querying symbols
+    if (il2cpp_domain_get && il2cpp_thread_attach) {
+        void* domain = il2cpp_domain_get();
+        if (domain) il2cpp_thread_attach(domain);
+    }
+
     static const char* kImages[] = {
         "UnityEngine.InputLegacyModule.dll",
         "UnityEngine.CoreModule.dll",
@@ -88,15 +80,19 @@ bool ResolveTouchBridge() {
         if (!bridge.touchCount) {
             bridge.touchCount = Il2CppGetMethodOffset(image, "UnityEngine", "Input", "get_touchCount", 0);
         }
-        if (!bridge.getTouch) {
-            bridge.getTouch = Il2CppGetMethodOffset(image, "UnityEngine", "Input", "GetTouch", 1);
+        if (!bridge.mousePosition) {
+            bridge.mousePosition = Il2CppGetMethodOffset(image, "UnityEngine", "Input", "get_mousePosition", 0);
         }
-        if (bridge.touchCount && bridge.getTouch) break;
+        if (!bridge.getMouseButton) {
+            bridge.getMouseButton = Il2CppGetMethodOffset(image, "UnityEngine", "Input", "GetMouseButton", 1);
+        }
+        if (bridge.mousePosition && bridge.touchCount) break;
     }
 
-    if (bridge.touchCount && bridge.getTouch) {
+    if (bridge.mousePosition || bridge.touchCount) {
         bridge.resolved = true;
-        Logger::Log("touch bridge resolved through il2cpp");
+        Logger::Log("touch bridge resolved through il2cpp (mousePos=%p touchCount=%p)",
+                    bridge.mousePosition, bridge.touchCount);
         return true;
     }
     return false;
@@ -131,23 +127,45 @@ void PumpTouch(ImGuiIO& io) {
         }
         if (!Touch().resolved) return;
     }
-    if (!Touch().touchCount || !Touch().getTouch) return;
+
+    static bool s_threadAttached = false;
+    if (!s_threadAttached && il2cpp_domain_get && il2cpp_thread_attach) {
+        void* domain = il2cpp_domain_get();
+        if (domain) {
+            il2cpp_thread_attach(domain);
+            s_threadAttached = true;
+        }
+    }
 
     static bool s_touching = false;
     static float s_touchStart = 0.0f;
 
-    const int count = ((int (*)())Touch().touchCount)();
-    if (count > 0 && count <= 10) {
-        const UnityTouch touch = ((UnityTouch (*)(int))Touch().getTouch)(0);
-        io.MousePos = ImVec2(touch.m_Position_x, io.DisplaySize.y - touch.m_Position_y);
-        if (!s_touching) s_touchStart = ImGui::GetTime();
-        io.MouseDown[0] = true;
-        s_touching = true;
-        return;
+    TouchBridge& bridge = Touch();
+
+    int count = 0;
+    if (bridge.touchCount) {
+        count = ((int (*)())bridge.touchCount)();
     }
 
-    // A one-frame release debounce keeps a tap from being read as a click plus
-    // a drag release.
+    bool buttonDown = false;
+    if (bridge.getMouseButton) {
+        buttonDown = ((bool (*)(int))bridge.getMouseButton)(0);
+    }
+
+    if ((count > 0 && count <= 10) || buttonDown) {
+        if (bridge.mousePosition) {
+            const UnityVector3 pos = ((UnityVector3 (*)())bridge.mousePosition)();
+            if (pos.x >= 0.0f && pos.x <= (float)g_GlWidth &&
+                pos.y >= 0.0f && pos.y <= (float)g_GlHeight) {
+                io.MousePos = ImVec2(pos.x, io.DisplaySize.y - pos.y);
+                if (!s_touching) s_touchStart = ImGui::GetTime();
+                io.MouseDown[0] = true;
+                s_touching = true;
+                return;
+            }
+        }
+    }
+
     if (s_touching && (ImGui::GetTime() - s_touchStart) < 0.06f) {
         io.MouseDown[0] = true;
         return;
@@ -229,20 +247,24 @@ bool InstallSwapBuffersHook() {
 }
 
 void Watcher() {
-    Logger::Log("watcher started");
+    Logger::Log("watcher started (pid %d)", (int)getpid());
 
+    // 1. Delayed start: Wait 4 seconds for Android activity, surface creation, and engine loader (OB55 pattern)
+    sleep(4);
+
+    // 2. Poll for libil2cpp.so to be fully mapped and initialized
     for (int tick = 0; tick < 180; ++tick) {
-        if (!g_EglHooked.load() && InstallSwapBuffersHook()) {
-            g_EglHooked.store(true);
-        }
-
         if (!g_Il2CppReady.load()) {
             EnsureIl2CppReady();
         }
 
-        if (g_EglHooked.load() && g_Il2CppReady.load()) {
-            Logger::Log("watcher: render hook and runtime both ready");
-            return;
+        // 3. Only install eglSwapBuffers hook AFTER runtime is fully ready and stable
+        if (g_Il2CppReady.load() && !g_EglHooked.load()) {
+            if (InstallSwapBuffersHook()) {
+                g_EglHooked.store(true);
+                Logger::Log("watcher: render hook and runtime both ready");
+                return;
+            }
         }
         sleep(1);
     }
@@ -256,7 +278,7 @@ __attribute__((constructor)) static void NinModsConstructor() {
     static std::atomic<bool> s_started{false};
     if (s_started.exchange(true)) return;
 
-    Logger::InstallCrashHandler();
+    Logger::Init();
     Logger::Log("NINMODS loaded, pid %d", (int)getpid());
     std::thread(Watcher).detach();
 }

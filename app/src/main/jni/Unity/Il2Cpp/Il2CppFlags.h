@@ -71,13 +71,14 @@ inline const char* MethodAccess(uint32_t flags) {
     }
 }
 
+// Types are emitted at namespace scope, so a nested type's original visibility
+// (private / protected) is not expressible there. Reporting it verbatim would
+// put `private class X` at namespace level, which C# rejects. Nested and
+// non-public visibility therefore map to internal; only public stays public.
 inline const char* TypeAccess(uint32_t flags) {
     switch (flags & kTypeVisibilityMask) {
         case kTypePublic:
         case kTypeNestedPublic:     return "public ";
-        case kTypeNestedPrivate:    return "private ";
-        case kTypeNestedFamily:     return "protected ";
-        case kTypeNestedFamOrAssem: return "protected internal ";
         default:                    return "internal ";
     }
 }

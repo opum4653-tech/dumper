@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <cstdarg>
 #include <cstring>
 #include <cstdio>
 #include <string>
@@ -131,27 +132,6 @@ inline bool ResolveOutputDir(char* out, size_t outSize) {
 // ---------------------------------------------------------------------------
 // Type helpers
 // ---------------------------------------------------------------------------
-inline const char* KindKeyword(int kind) {
-    switch (kind) {
-        case 0x01: return "void";
-        case 0x02: return "bool";
-        case 0x03: return "char";
-        case 0x04: return "signed char";
-        case 0x05: return "unsigned char";
-        case 0x06: return "short";
-        case 0x07: return "unsigned short";
-        case 0x08: return "int";
-        case 0x09: return "unsigned int";
-        case 0x0a: return "long long";
-        case 0x0b: return "unsigned long long";
-        case 0x0c: return "float";
-        case 0x0d: return "double";
-        case 0x18: return "intptr_t";
-        case 0x19: return "uintptr_t";
-        default:   return nullptr;
-    }
-}
-
 // Size of a field type in bytes. Primitives have fixed widths; reference types
 // and pointers are pointer sized; value types ask the runtime through
 // il2cpp_class_value_size. Unknown kinds return 0 so the caller pads instead of
@@ -165,12 +145,11 @@ inline size_t TypeSize(const void* type) {
         case 0x03: case 0x06: case 0x07: return 2;              // char, i2, u2
         case 0x08: case 0x09: case 0x0c: return 4;              // i4, u4, r4
         case 0x0a: case 0x0b: case 0x0d: return 8;              // i8, u8, r8
-        case 0x0e: case 0x0f: case 0x12: case 0x14:             // string, ptr, class, array
-        case 0x15: case 0x1c: case 0x1d: case 0x1b:             // genericinst, object, szarray, fnptr
+        case 0x0e: case 0x0f: case 0x10: case 0x12: case 0x14:  // string, ptr, byref, class, array
+        case 0x15: case 0x1b: case 0x1c: case 0x1d:             // genericinst, fnptr, object, szarray
         case 0x18: case 0x19:                                   // i, u
             return sizeof(void*);
-        case 0x11:                                              // valuetype
-        case 0x55: {                                            // enum
+        case 0x11: {                                            // valuetype (enum included)
             const void* klass = Il2CppClassFromType(type);
             if (klass) {
                 uint32_t align = 0;
@@ -201,6 +180,35 @@ inline std::string SanitizeIdentifier(const std::string& text) {
     return out;
 }
 
+// C++ keywords. A CLR member may legally be named any of these, so a
+// sanitized identifier that collides gets a trailing underscore.
+inline bool IsCppKeyword(const std::string& s) {
+    static const char* const kKeywords[] = {
+        "alignas", "alignof", "and", "asm", "auto", "bool", "break", "case",
+        "catch", "char", "class", "const", "constexpr", "continue", "default",
+        "delete", "do", "double", "else", "enum", "explicit", "export", "extern",
+        "false", "float", "for", "friend", "goto", "if", "inline", "int", "long",
+        "mutable", "namespace", "new", "noexcept", "not", "nullptr", "operator",
+        "or", "private", "protected", "public", "register", "reinterpret_cast",
+        "return", "short", "signed", "sizeof", "static", "struct", "switch",
+        "template", "this", "throw", "true", "try", "typedef", "typeid",
+        "typename", "union", "unsigned", "using", "virtual", "void", "volatile",
+        "wchar_t", "while", "xor"
+    };
+    for (const char* k : kKeywords) {
+        if (s == k) return true;
+    }
+    return false;
+}
+
+inline std::string CppIdentifier(const std::string& text) {
+    std::string out = SanitizeIdentifier(text);
+    if (IsCppKeyword(out)) out += '_';
+    return out;
+}
+
+// C# keywords. Same idea, but C# escapes them with a leading '@' instead of a
+// suffix, and that form is legal in any context a plain identifier is.
 inline std::string QualifiedName(const std::string& ns, const std::string& name) {
     if (ns.empty()) return name;
     return ns + "." + name;
@@ -254,6 +262,7 @@ struct ClassSnapshot {
     std::string              parentName;
     std::string              imageName;
     int32_t                  instanceSize = 0;
+    int32_t                  parentInstanceSize = 0;
     uint32_t                 flags = 0;
     bool                     isEnum = false;
     bool                     isValueType = false;
@@ -276,8 +285,9 @@ inline void CollectMethod(const void* method, MethodSnapshot& out) {
     out.paramCount = Il2CppMethodGetParamCount(method);
     out.flags = Il2CppMethodGetFlags(method);
 
+    // An unresolved type stays empty. Substituting a placeholder here would be
+    // written to disk as though the runtime had reported it.
     out.returnType = CopyTypeName(Il2CppMethodGetReturnType(method));
-    if (out.returnType.empty()) out.returnType = "void";
 
     if (out.paramCount > 0 && out.paramCount < 64) {
         out.params.reserve(out.paramCount);
@@ -285,12 +295,14 @@ inline void CollectMethod(const void* method, MethodSnapshot& out) {
             ParamSnapshot param;
             param.name = Il2CppMethodGetParamName(method, i);
             if (param.name.empty()) {
+                // The runtime exposes no parameter name. The metadata keeps the
+                // real one, but the parameter table is not decoded here, so only
+                // the position is known. argN states exactly that.
                 char generated[24];
                 snprintf(generated, sizeof(generated), "arg%u", i);
                 param.name = generated;
             }
             param.typeName = CopyTypeName(Il2CppMethodGetParamType(method, i));
-            if (param.typeName.empty()) param.typeName = "object";
             out.params.push_back(param);
         }
     }
@@ -330,7 +342,12 @@ inline bool CollectClass(const void* klass, const char* imageName, ClassSnapshot
     out.instanceSize = Il2CppClassGetInstanceSize(klass);
 
     const void* parent = Il2CppClassGetParent(klass);
-    if (parent) out.parentName = Il2CppClassGetName(parent);
+    if (parent) {
+        out.parentName = Il2CppClassGetName(parent);
+        // The parent's instance size is where this class's own fields may start.
+        // Without it the emitted struct cannot describe the layout correctly.
+        out.parentInstanceSize = Il2CppClassGetInstanceSize(parent);
+    }
 
     void* fieldIter = nullptr;
     int guard = 0;
@@ -346,11 +363,16 @@ inline bool CollectClass(const void* klass, const char* imageName, ClassSnapshot
         snapshot.flags = (uint32_t)Il2CppFieldGetFlags(field);
         snapshot.isStatic = (snapshot.flags & Il2CppFlags::kFieldStatic) != 0;
         snapshot.isLiteral = (snapshot.flags & Il2CppFlags::kFieldLiteral) != 0;
-        snapshot.hasRealOffset = (!snapshot.isStatic && !snapshot.isLiteral && snapshot.offset > 0);
+        // il2cpp_field_get_offset is authoritative for instance fields, and 0 is
+        // a legitimate offset (the first field of a base-less layout). The flag
+        // only means "the runtime answered", not "the answer was non-zero".
+        snapshot.hasRealOffset =
+            !snapshot.isStatic && !snapshot.isLiteral && Il2CppFieldOffsetAvailable();
 
         const void* fieldType = Il2CppFieldGetType(field);
+        // Empty means the runtime did not answer. The writer states that rather
+        // than printing a type the runtime never reported.
         snapshot.typeName = CopyTypeName(fieldType);
-        if (snapshot.typeName.empty()) snapshot.typeName = "object";
         snapshot.size = TypeSize(fieldType);
 
         out.fields.push_back(std::move(snapshot));
@@ -372,89 +394,117 @@ inline bool CollectClass(const void* klass, const char* imageName, ClassSnapshot
     return true;
 }
 
+// Fallback used only when the runtime exposes no classes at all. It reads
+// global-metadata.dat directly, which is where the names and flags the runtime
+// itself reads come from. What it cannot provide is the field type, the field
+// offset and the method code pointer, because all three live in the runtime's
+// Il2CppType table and class layout, not in the metadata. Those stay empty
+// instead of being filled with a plausible-looking lie, and the writers mark
+// them as unavailable.
 inline bool CollectFromMetadata(Snapshot& out) {
     MetadataParser::Located loc;
-    if (!MetadataParser::Locate(loc)) return false;
+    if (!MetadataParser::Locate(loc)) {
+        __android_log_print(ANDROID_LOG_INFO, "NINMODS",
+                            "metadata fallback: no decodable global-metadata.dat "
+                            "(supported versions %d-%d)",
+                            MetadataParser::kMinVersion, MetadataParser::kMaxVersion);
+        return false;
+    }
 
-    MetadataParser::HeaderV24 header;
-    if (!SafeMemory::Read(loc.address, &header, sizeof(header))) return false;
-    if (header.magic != MetadataParser::kMetadataMagic) return false;
-    if (header.typeDefinitionsOffset == 0 || header.typeDefinitionsCount == 0) return false;
+    __android_log_print(ANDROID_LOG_INFO, "NINMODS",
+                        "metadata fallback: %s, %zu types, %zu fields, %zu methods",
+                        MetadataParser::DescribeVersion(loc.version).c_str(),
+                        loc.typeCount, loc.fieldCount, loc.methodCount);
 
-    const size_t typeCount = header.typeDefinitionsCount / sizeof(MetadataParser::TypeDefinitionEntry);
-    if (typeCount == 0 || typeCount > 200000) return false;
-
-    const uintptr_t typesAddr = loc.address + header.typeDefinitionsOffset;
-    const uintptr_t fieldsAddr = loc.address + header.fieldsOffset;
-    const uintptr_t methodsAddr = loc.address + header.methodsOffset;
-    const uintptr_t stringsAddr = loc.address + header.stringOffset;
+    const uintptr_t typesAddr   = loc.address + loc.header.typeDefinitionsOffset;
+    const uintptr_t fieldsAddr  = loc.address + loc.header.fieldsOffset;
+    const uintptr_t methodsAddr = loc.address + loc.header.methodsOffset;
 
     auto readString = [&](uint32_t index) -> std::string {
-        if (index >= header.stringCount) return "";
-        char buf[256];
-        if (SafeMemory::ReadCString(stringsAddr + index, buf, sizeof(buf))) {
-            return std::string(buf);
-        }
-        return "";
+        char buffer[512];
+        if (!MetadataParser::ReadString(loc, index, buffer, sizeof(buffer))) return std::string();
+        return std::string(buffer);
     };
 
     ImageSnapshot fallbackImage;
-    fallbackImage.name = "Assembly-CSharp.dll";
+    fallbackImage.name = "global-metadata.dat";
 
-    for (size_t i = 0; i < typeCount; ++i) {
-        MetadataParser::TypeDefinitionEntry td{};
-        if (!SafeMemory::Read(typesAddr + i * sizeof(MetadataParser::TypeDefinitionEntry), &td, sizeof(td))) break;
+    for (size_t i = 0; i < loc.typeCount; ++i) {
+        MetadataParser::TypeDefView td;
+        if (!MetadataParser::ReadTypeDef(typesAddr + i * sizeof(MetadataParser::TypeDefinitionEntry),
+                                         td)) {
+            break;
+        }
 
-        std::string kName = readString(td.nameIndex);
-        if (kName.empty()) continue;
+        const std::string className = readString(td.nameIndex);
+        if (className.empty()) continue;
 
         ClassSnapshot cls;
-        cls.name = kName;
-        cls.namespaze = readString(td.namespaceIndex);
-        cls.imageName = fallbackImage.name;
-        cls.flags = td.flags;
+        cls.name        = className;
+        cls.namespaze   = readString(td.namespaceIndex);
+        cls.imageName   = fallbackImage.name;
+        cls.flags       = td.flags;
+        cls.isInterface = (td.flags & Il2CppFlags::kTypeInterface) != 0;
+        cls.isAbstract  = (td.flags & Il2CppFlags::kTypeAbstract) != 0;
+        cls.isValueType = td.ValueType();
+        cls.isEnum      = td.EnumType();
 
-        // Fields
-        for (uint16_t f = 0; f < td.field_count; ++f) {
-            uint32_t fIndex = td.fieldStart + f;
-            MetadataParser::FieldDefinitionEntry fd{};
-            if (!SafeMemory::Read(fieldsAddr + fIndex * sizeof(MetadataParser::FieldDefinitionEntry), &fd, sizeof(fd))) break;
-            std::string fName = readString(fd.nameIndex);
-            if (!fName.empty()) {
-                FieldSnapshot field;
-                field.name = fName;
-                field.typeName = "var";
-                field.offset = 0;
-                field.hasRealOffset = false;
-                cls.fields.push_back(field);
+        if (loc.fieldCount != 0) {
+            const size_t fieldEnd = (size_t)td.fieldStart + td.fieldCount;
+            if (fieldEnd <= loc.fieldCount) {
+                for (uint16_t f = 0; f < td.fieldCount; ++f) {
+                    uint32_t nameIndex = 0;
+                    const uint32_t fieldIndex = td.fieldStart + f;
+                    if (!MetadataParser::ReadFieldDef(
+                            fieldsAddr + (uintptr_t)fieldIndex * sizeof(MetadataParser::FieldDefinitionEntry),
+                            nameIndex)) {
+                        break;
+                    }
+
+                    const std::string fieldName = readString(nameIndex);
+                    if (fieldName.empty()) continue;
+
+                    FieldSnapshot field;
+                    field.name = fieldName;
+                    field.hasRealOffset = false;   // not derivable without the runtime
+                    field.size = 0;
+                    cls.fields.push_back(std::move(field));
+                }
             }
         }
 
-        // Methods
-        for (uint16_t m = 0; m < td.method_count; ++m) {
-            uint32_t mIndex = td.methodStart + m;
-            MetadataParser::MethodDefinitionEntry md{};
-            if (!SafeMemory::Read(methodsAddr + mIndex * sizeof(MetadataParser::MethodDefinitionEntry), &md, sizeof(md))) break;
-            std::string mName = readString(md.nameIndex);
-            if (!mName.empty()) {
-                MethodSnapshot method;
-                method.name = mName;
-                method.returnType = "void";
-                method.paramCount = md.parameterCount;
-                method.flags = md.flags;
-                method.hasRva = false;
-                cls.methods.push_back(method);
+        if (loc.methodCount != 0) {
+            const size_t methodEnd = (size_t)td.methodStart + td.methodCount;
+            if (methodEnd <= loc.methodCount) {
+                for (uint16_t m = 0; m < td.methodCount; ++m) {
+                    MetadataParser::MethodDefView md;
+                    const uint32_t methodIndex = td.methodStart + m;
+                    if (!MetadataParser::ReadMethodDef(
+                            methodsAddr + (uintptr_t)methodIndex * sizeof(MetadataParser::MethodDefinitionEntry),
+                            md)) {
+                        break;
+                    }
+
+                    const std::string methodName = readString(md.nameIndex);
+                    if (methodName.empty()) continue;
+
+                    MethodSnapshot method;
+                    method.name       = methodName;
+                    method.paramCount = md.parameterCount;
+                    method.flags      = md.flags;
+                    method.hasBody    = false;   // no code pointer without the runtime
+                    method.hasRva     = false;
+                    cls.methods.push_back(std::move(method));
+                }
             }
         }
 
         fallbackImage.classes.push_back(std::move(cls));
     }
 
-    if (!fallbackImage.classes.empty()) {
-        out.push_back(std::move(fallbackImage));
-        return true;
-    }
-    return false;
+    if (fallbackImage.classes.empty()) return false;
+    out.push_back(std::move(fallbackImage));
+    return true;
 }
 
 inline bool Collect(Snapshot& out) {
@@ -507,24 +557,69 @@ inline void WriteCsClass(DumpWriter::File& file, const ClassSnapshot& cls) {
     file.Printf("// Namespace: %s\n", cls.namespaze.c_str());
     file.Printf("%s%s %s", Il2CppFlags::TypeAccess(cls.flags), keyword, cls.name.c_str());
 
-    if (!cls.parentName.empty() && !cls.isEnum && !cls.isValueType && cls.parentName != "Object") {
+    // An interface's base list is other interfaces. A class base name there is
+    // the runtime's Object root, which C# rejects, so it is only printed for
+    // classes and structs.
+    if (!cls.isInterface && !cls.parentName.empty() && !cls.isEnum &&
+        !cls.isValueType && cls.parentName != "Object") {
         file.Printf(" : %s", cls.parentName.c_str());
     }
     file.Put(" // Dll: ");
     file.Put(cls.imageName);
-    file.Printf(" Size: 0x%x\n{\n", cls.instanceSize);
+    if (cls.instanceSize > 0) {
+        file.Printf(" Size: 0x%x\n{\n", cls.instanceSize);
+    } else {
+        file.Put(" Size: unavailable\n{\n");
+    }
 
-    if (!cls.fields.empty()) {
+    // An enum's members are compile-time constants stored in the metadata
+    // constant blob, not instance fields. Declaring the runtime's instance
+    // fields inside an enum body would not compile, and the values cannot be
+    // recovered from the runtime, so the member list is stated as unavailable.
+    if (cls.isEnum) {
+        file.Put("\t// members unavailable: enum constants live in the metadata\n");
+        file.Put("\t// constant blob, which the runtime does not expose\n");
+        file.Put("}\n\n");
+        return;
+    }
+
+    // C# interfaces cannot declare fields at all. The runtime still reports them
+    // (they are the static backing values of properties), so they are recorded
+    // as comments: emitting them as fields would make the file fail to compile.
+    const bool interfaceBody = cls.isInterface;
+
+    if (interfaceBody) {
+        if (!cls.fields.empty()) {
+            file.Put("\t// fields unavailable: C# interfaces cannot declare fields\n");
+            for (const FieldSnapshot& field : cls.fields) {
+                if (field.name.empty()) continue;
+                file.Printf("\t//   %s%s\n",
+                            field.typeName.empty() ? "" : (field.typeName + " ").c_str(),
+                            field.name.c_str());
+            }
+        }
+    } else if (!cls.fields.empty()) {
         file.Put("\t// Fields\n");
         for (const FieldSnapshot& field : cls.fields) {
+            if (field.typeName.empty()) {
+                // Metadata-only dump: the field type lives in the runtime type
+                // table, not in the metadata header. Say so instead of printing
+                // a placeholder type that would read as a real one.
+                file.Printf("\t// %s -- type unavailable (metadata-only dump)\n", field.name.c_str());
+                continue;
+            }
+            if (field.isLiteral) {
+                // A literal is a const whose value sits in the metadata constant
+                // blob. C# requires an initializer on a const, and the value is
+                // not available from the runtime, so the field is stated.
+                file.Printf("\t// const %s %s -- value unavailable (metadata constant)\n",
+                            field.typeName.c_str(), field.name.c_str());
+                continue;
+            }
             file.Put("\t");
             file.Put(Il2CppFlags::FieldAccess(field.flags));
-            if (field.isLiteral) {
-                file.Put("const ");
-            } else {
-                if (field.isStatic) file.Put("static ");
-                if (field.flags & Il2CppFlags::kFieldInitOnly) file.Put("readonly ");
-            }
+            if (field.isStatic) file.Put("static ");
+            if (field.flags & Il2CppFlags::kFieldInitOnly) file.Put("readonly ");
             if (field.hasRealOffset) {
                 file.Printf("%s %s; // 0x%zx\n", field.typeName.c_str(), field.name.c_str(), field.offset);
             } else {
@@ -540,29 +635,67 @@ inline void WriteCsClass(DumpWriter::File& file, const ClassSnapshot& cls) {
             uint32_t flags = method.flags;
             if (flags & Il2CppFlags::kMethodAbstract) {
                 file.Put("\t// (ABSTRACT)\n");
-            } else if (method.hasRva && method.rva > 0) {
+            } else if (method.hasRva) {
                 file.Printf("\t// RVA: 0x%llx VA: 0x%lx\n",
                             (unsigned long long)method.rva, (unsigned long)method.va);
             } else if (method.isExternal) {
                 file.Printf("\t// RVA: EXTERNAL (%s) VA: 0x%lx\n",
                             method.ownerModule.c_str(), (unsigned long)method.va);
             } else {
-                file.Put("\t// (NO BODY)\n");
+                // No code pointer means no RVA. Writing 0x0 would collide with a
+                // real address, so the absence is stated instead.
+                file.Put("\t// no code pointer (no RVA)\n");
+            }
+
+            if (method.returnType.empty()) {
+                // No return type from the runtime means the declaration cannot be
+                // stated. Printing a guessed one would read as a real signature.
+                file.Printf("\t// %s(%u params) -- signature unavailable: return type not reported\n",
+                            method.name.c_str(), method.paramCount);
+                continue;
+            }
+
+            // A parameter whose type the runtime did not report cannot be
+            // declared. The whole declaration is downgraded to a comment so the
+            // file still parses and the gap is visible.
+            bool typesKnown = true;
+            for (const ParamSnapshot& param : method.params) {
+                if (param.typeName.empty()) { typesKnown = false; break; }
+            }
+            if (!typesKnown) {
+                file.Printf("\t// %s(%u params) -- signature unavailable: parameter type not reported\n",
+                            method.name.c_str(), method.paramCount);
+                continue;
             }
 
             file.Put("\t");
-            file.Put(Il2CppFlags::MethodAccess(flags));
-            if (flags & Il2CppFlags::kMethodStatic) file.Put("static ");
-            if (flags & Il2CppFlags::kMethodVirtual) file.Put("virtual ");
-            if (flags & Il2CppFlags::kMethodAbstract) file.Put("abstract ");
-            if (flags & Il2CppFlags::kMethodPinvoke) file.Put("extern ");
+            // Interface members are implicitly public and cannot carry an access
+            // modifier, static, virtual, abstract or extern. Emitting any of them
+            // inside an interface makes the file fail to parse.
+            if (!cls.isInterface) {
+                file.Put(Il2CppFlags::MethodAccess(flags));
+                if (flags & Il2CppFlags::kMethodStatic) file.Put("static ");
+                // abstract implies virtual in the metadata, but C# rejects the
+                // pair, so only one of the two is ever printed.
+                if (flags & Il2CppFlags::kMethodAbstract)      file.Put("abstract ");
+                else if (flags & Il2CppFlags::kMethodVirtual)  file.Put("virtual ");
+                if (flags & Il2CppFlags::kMethodPinvoke) file.Put("extern ");
+            }
 
             file.Printf("%s %s(", method.returnType.c_str(), method.name.c_str());
             for (size_t i = 0; i < method.params.size(); ++i) {
                 if (i) file.Put(", ");
-                file.Printf("%s %s", method.params[i].typeName.c_str(), method.params[i].name.c_str());
+                file.Printf("%s %s", method.params[i].typeName.c_str(),
+                            method.params[i].name.c_str());
             }
-            file.Put(") { }\n");
+
+            // A body is only valid where the method actually has a code pointer.
+            // abstract, extern (pinvoke) and interface members end with a
+            // semicolon: giving them { } is a compile error in C#.
+            const bool needsBody = !cls.isInterface &&
+                                   !(flags & Il2CppFlags::kMethodAbstract) &&
+                                   !(flags & Il2CppFlags::kMethodPinvoke);
+            file.Put(needsBody ? ") { }\n" : ");\n");
         }
     }
 
@@ -599,30 +732,69 @@ inline bool WriteCs(const std::string& path, const Snapshot& snapshot) {
 // il2cpp.h - layout-accurate C++ structs
 // ---------------------------------------------------------------------------
 inline void WriteSdkClass(DumpWriter::File& file, const ClassSnapshot& cls) {
-    // Only classes with a real instance layout are emitted; interfaces and
-    // static-only types have no fields to describe.
-    if (cls.isInterface) return;
-    if (cls.fields.empty() && cls.instanceSize <= 0) return;
+    // A struct body is only emitted when every instance field it describes has a
+    // runtime-provided offset. A metadata-only snapshot has names but no
+    // offsets, and laying those out at guessed positions would produce a header
+    // that compiles and then reads the wrong bytes at runtime.
+    //
+    // Interfaces have no instance layout, and an enum's real C++ representation
+    // is the underlying integer type, which the runtime exposes only as the type
+    // of its single value__ field. Neither is emitted as a struct.
+    if (cls.isInterface || cls.isEnum) return;
 
-    const std::string owner = SanitizeIdentifier(QualifiedName(cls.namespaze, cls.name));
+    bool anyRealOffset = false;
+    for (const FieldSnapshot& field : cls.fields) {
+        if (field.isStatic || field.isLiteral) continue;
+        if (field.hasRealOffset && field.size > 0) { anyRealOffset = true; break; }
+    }
+    if (!anyRealOffset) return;
+    if (cls.instanceSize <= 0) return;
+
+    const std::string owner = CppIdentifier(QualifiedName(cls.namespaze, cls.name));
 
     file.Printf("// %s (Dll: %s, size 0x%x)\n", QualifiedName(cls.namespaze, cls.name).c_str(),
                 cls.imageName.c_str(), cls.instanceSize);
 
-    // Base first: an instance of a derived class begins with its parent.
+    // An instance of a derived class begins with its parent, so the first byte
+    // available to a declared field is the parent's full instance size, not a
+    // pointer. A wrong base size shifts every field that follows it.
     const bool hasParent = !cls.parentName.empty() && cls.parentName != "Object" &&
                            !cls.isEnum && !cls.isValueType;
 
     file.Printf("struct %s", owner.c_str());
     if (hasParent) {
-        file.Printf(" /* : %s */", cls.parentName.c_str());
+        file.Printf(" /* derives from %s, base occupies 0x%x bytes */",
+                    cls.parentName.c_str(), cls.parentInstanceSize);
     }
     file.Put(" {\n");
 
-    size_t cursor = hasParent ? sizeof(void*) : 0;
+    size_t cursor = 0;
+    if (hasParent) {
+        if (cls.parentInstanceSize <= 0) {
+            // The parent size is unknown, so no byte position after it can be
+            // stated. Emitting a body here would place every field at a wrong
+            // offset, so the layout is left out and the reason is recorded.
+            file.Printf("\t// layout unavailable: parent %s instance size unknown\n};\n\n",
+                        cls.parentName.c_str());
+            return;
+        }
+        // A parent larger than the derived instance cannot be a plain layout: the
+        // base alone would overflow the struct and the static_assert below would
+        // fail to compile. That happens for generic or inflated parents, where
+        // il2cpp_class_instance_size reports an uninstantiated size.
+        if ((size_t)cls.parentInstanceSize > (size_t)cls.instanceSize) {
+            file.Printf("\t// layout unavailable: parent %s size 0x%x exceeds instance size 0x%x\n};\n\n",
+                        cls.parentName.c_str(), cls.parentInstanceSize, cls.instanceSize);
+            return;
+        }
+        file.Printf("\tuint8_t _base_%s[0x%x];\n",
+                    CppIdentifier(cls.parentName).c_str(), cls.parentInstanceSize);
+        cursor = (size_t)cls.parentInstanceSize;
+    }
 
     for (const FieldSnapshot& field : cls.fields) {
         if (field.isStatic || field.isLiteral) continue;   // not part of the instance
+        if (!field.hasRealOffset) continue;                // no runtime offset: cannot lay out
         if (field.size == 0) continue;                     // unknown width: skip, keep offsets intact
 
         const size_t offset = field.offset;
@@ -640,7 +812,7 @@ inline void WriteSdkClass(DumpWriter::File& file, const ClassSnapshot& cls) {
             continue;
         }
 
-        const std::string fieldName = SanitizeIdentifier(field.name);
+        const std::string fieldName = CppIdentifier(field.name);
         file.Printf("\tuint8_t %s[0x%zx]; // +0x%zx %s\n",
                     fieldName.c_str(), field.size, offset, field.typeName.c_str());
         cursor = offset + field.size;
@@ -652,9 +824,17 @@ inline void WriteSdkClass(DumpWriter::File& file, const ClassSnapshot& cls) {
     }
 
     file.Put("};\n");
-    if (cls.instanceSize > 0) {
+    // The assertion is only emitted when the emitted body actually reaches the
+    // runtime-reported size. A field whose offset lands past that size (an
+    // inflated or trimmed class) makes the two disagree, and asserting then
+    // would fail to compile a header that faithfully records the runtime.
+    if (cls.instanceSize > 0 && cursor == (size_t)cls.instanceSize) {
         file.Printf("static_assert(sizeof(%s) == 0x%x, \"layout mismatch\");\n\n",
                     owner.c_str(), cls.instanceSize);
+    } else if (cls.instanceSize > 0) {
+        file.Printf("// sizeof(%s) is 0x%zx, runtime reports 0x%x: a field offset lies\n",
+                    owner.c_str(), cursor, cls.instanceSize);
+        file.Put("// past the reported instance size, so no assertion is emitted.\n\n");
     } else {
         file.Put("\n");
     }
@@ -665,44 +845,32 @@ inline bool WriteSdk(const std::string& path, const Snapshot& snapshot) {
     if (!file.Open(path.c_str())) return false;
 
     file.Put("// ==========================================================================\n");
-    file.Put("// NINMODS Modern Il2Cpp C++ SDK Header (Unity 2019 - 2023+)\n");
+    file.Put("// NINMODS Il2Cpp C++ SDK Header\n");
     file.Printf("// Target Package: %s\n", TargetPackage().c_str());
     file.Put("// ==========================================================================\n");
     file.Put("#pragma once\n");
     file.Put("#include <cstdint>\n");
     file.Put("#include <cstddef>\n\n");
 
-    file.Put("typedef void(*Il2CppMethodPointer)();\n");
+    file.Put("typedef void (*Il2CppMethodPointer)();\n");
     file.Put("typedef uintptr_t il2cpp_array_size_t;\n\n");
-    file.Put("struct Il2CppType { void* data; unsigned int bits; };\n");
+    file.Put("// Il2CppClass, FieldInfo, MethodInfo and Il2CppType keep their fields in an\n");
+    file.Put("// order that changes between Unity releases. They stay incomplete types so\n");
+    file.Put("// that reaching into them is a compile error rather than a silent misread.\n");
+    file.Put("// Query them through the il2cpp exports.\n");
     file.Put("struct Il2CppClass;\n");
     file.Put("struct MethodInfo;\n");
-    file.Put("struct FieldInfo;\n\n");
+    file.Put("struct FieldInfo;\n");
+    file.Put("struct Il2CppType;\n\n");
     file.Put("struct Il2CppObject {\n    Il2CppClass *klass;\n    void *monitor;\n};\n\n");
     file.Put("struct Il2CppString : public Il2CppObject {\n    int32_t length;\n    uint16_t chars[1];\n};\n\n");
     file.Put("struct Il2CppArrayBounds {\n    il2cpp_array_size_t length;\n    int32_t lower_bound;\n};\n\n");
     file.Put("struct Il2CppArray : public Il2CppObject {\n    Il2CppArrayBounds *bounds;\n    il2cpp_array_size_t max_length;\n};\n\n");
-    file.Put("struct MethodInfo {\n");
+    file.Put("// MethodInfo's first field is methodPointer in every published il2cpp\n");
+    file.Put("// version, which is the only part of the layout this project relies on.\n");
+    file.Put("struct MethodInfoPrefix {\n");
     file.Put("    Il2CppMethodPointer methodPointer;\n");
-    file.Put("    Il2CppMethodPointer virtualMethodPointer;\n");
-    file.Put("    void* invoker_method;\n");
-    file.Put("    const char* name;\n");
-    file.Put("    Il2CppClass *klass;\n");
-    file.Put("    const Il2CppType *return_type;\n");
-    file.Put("    const void* parameters;\n");
-    file.Put("    void* methodDefinition;\n");
-    file.Put("    void* genericContainer;\n");
-    file.Put("    uint32_t token;\n");
-    file.Put("    uint16_t flags;\n");
-    file.Put("    uint16_t iflags;\n");
-    file.Put("    uint16_t slot;\n");
-    file.Put("    uint8_t parameters_count;\n};\n\n");
-    file.Put("struct FieldInfo {\n");
-    file.Put("    const char* name;\n");
-    file.Put("    const Il2CppType* type;\n");
-    file.Put("    Il2CppClass *parent;\n");
-    file.Put("    int32_t offset;\n");
-    file.Put("    uint32_t token;\n};\n\n");
+    file.Put("};\n\n");
     file.Put("// --------------------------------------------------------------------------\n");
     file.Put("// Game Classes & Structures\n");
     file.Put("// --------------------------------------------------------------------------\n\n");
@@ -710,8 +878,18 @@ inline bool WriteSdk(const std::string& path, const Snapshot& snapshot) {
     std::set<std::string> emitted;
     for (const ImageSnapshot& image : snapshot) {
         for (const ClassSnapshot& cls : image.classes) {
-            const std::string owner = SanitizeIdentifier(QualifiedName(cls.namespaze, cls.name));
-            if (!emitted.insert(owner).second) continue;   // same class in two images
+            const std::string owner = CppIdentifier(QualifiedName(cls.namespaze, cls.name));
+            // The same class can appear in two images, and two different CLR names
+            // can sanitize to one identifier. Both would be a redefinition in a
+            // header that is meant to compile, so only the first is emitted and
+            // the collision is recorded instead of dropped silently.
+            if (!emitted.insert(owner).second) {
+                file.Printf("// %s (Dll: %s) not emitted: its identifier %s is already\n",
+                            QualifiedName(cls.namespaze, cls.name).c_str(),
+                            cls.imageName.c_str(), owner.c_str());
+                file.Put("// defined by an earlier class.\n\n");
+                continue;
+            }
             WriteSdkClass(file, cls);
         }
     }
@@ -737,24 +915,34 @@ inline bool WriteOffsets(const std::string& path, const Snapshot& snapshot) {
     for (const ImageSnapshot& image : snapshot) {
         file.Printf("// ---------------- %s ----------------\n\n", image.name.c_str());
         for (const ClassSnapshot& cls : image.classes) {
-            const std::string owner = SanitizeIdentifier(QualifiedName(cls.namespaze, cls.name));
+            const std::string owner = CppIdentifier(QualifiedName(cls.namespaze, cls.name));
             if (cls.fields.empty() && cls.methods.empty()) continue;
+
+            // A macro name has to be unique in the translation unit that includes
+            // this header. Two things collide here: the same class appearing in
+            // two images, and two overloads of one method. Both are deduplicated
+            // by the full macro name, and the first definition wins because the
+            // runtime returned the same offset/RVA for the same name.
+            std::set<std::string> emitted;
 
             file.Printf("// %s\n", QualifiedName(cls.namespaze, cls.name).c_str());
 
             for (const FieldSnapshot& field : cls.fields) {
                 if (field.isStatic || field.isLiteral) continue;
-                if (!field.hasRealOffset || field.offset == 0) continue; // Real offsets only
-                const std::string fieldName = SanitizeIdentifier(field.name);
-                file.Printf("#define OFFSET_%s_%s 0x%zxULL\n", owner.c_str(), fieldName.c_str(), field.offset);
+                if (!field.hasRealOffset) continue;   // no runtime offset: no macro
+                const std::string fieldName = CppIdentifier(field.name);
+                const std::string macro = "OFFSET_" + owner + "_" + fieldName;
+                if (!emitted.insert(macro).second) continue;
+                file.Printf("#define %s 0x%zxULL\n", macro.c_str(), field.offset);
             }
 
             for (const MethodSnapshot& method : cls.methods) {
-                if (!method.hasRva || method.rva == 0) continue; // Real RVAs only
-                const std::string methodName = SanitizeIdentifier(method.name);
-                file.Printf("#define RVA_%s_%s 0x%llxULL // params: %u\n",
-                            owner.c_str(), methodName.c_str(),
-                            (unsigned long long)method.rva, method.paramCount);
+                if (!method.hasRva) continue;         // no code pointer: no macro
+                const std::string methodName = CppIdentifier(method.name);
+                const std::string macro = "RVA_" + owner + "_" + methodName;
+                if (!emitted.insert(macro).second) continue;
+                file.Printf("#define %s 0x%llxULL // params: %u\n",
+                            macro.c_str(), (unsigned long long)method.rva, method.paramCount);
             }
             file.Put("\n");
         }
@@ -775,25 +963,42 @@ inline bool WriteScriptJson(const std::string& path, const Snapshot& snapshot) {
     file.Put("{\n  \"ScriptMethod\": [\n");
 
     bool first = true;
+    // Two overloads share a class and a name but not an address. Emitting the
+    // same plain name twice makes the disassembler keep only the last one, so a
+    // repeated name gets the parameter count appended, and a further tie gets a
+    // numeric suffix. The address is unchanged; the suffix only disambiguates.
+    std::set<std::string> usedNames;
+
     for (const ImageSnapshot& image : snapshot) {
         for (const ClassSnapshot& cls : image.classes) {
             const std::string owner = QualifiedName(cls.namespaze, cls.name);
             for (const MethodSnapshot& method : cls.methods) {
                 if (!method.hasRva) continue;
 
+                const std::string base = owner + "$$" + method.name;
+                std::string symbol = base;
+                if (usedNames.count(symbol) != 0) {
+                    symbol = base + "/" + std::to_string(method.paramCount) + "p";
+                    int tie = 2;
+                    while (usedNames.count(symbol) != 0) {
+                        symbol = base + "/" + std::to_string(method.paramCount) + "p#" + std::to_string(tie);
+                        ++tie;
+                    }
+                }
+                usedNames.insert(symbol);
+
                 // Build a readable signature for the disassembler.
-                std::string signature = method.returnType + " " + owner + "$$" + method.name + "(";
+                std::string signature = method.returnType + " " + symbol + "(";
                 for (size_t i = 0; i < method.params.size(); ++i) {
                     if (i) signature += ", ";
                     signature += method.params[i].typeName;
                 }
                 signature += ")";
 
-                file.Printf("%s    {\n      \"Address\": %llu,\n      \"Name\": \"%s$$%s\",\n      \"Signature\": \"%s\"\n    }",
+                file.Printf("%s    {\n      \"Address\": %llu,\n      \"Name\": \"%s\",\n      \"Signature\": \"%s\"\n    }",
                             first ? "" : ",\n",
                             (unsigned long long)method.rva,
-                            JsonWriter::EscapeString(owner.c_str()).c_str(),
-                            JsonWriter::EscapeString(method.name.c_str()).c_str(),
+                            JsonWriter::EscapeString(symbol.c_str()).c_str(),
                             JsonWriter::EscapeString(signature.c_str()).c_str());
                 first = false;
             }
@@ -835,15 +1040,18 @@ inline bool DumpMetadata(const std::string& dir, std::string& note) {
 }
 
 inline bool DumpElf(const std::string& dir, std::string& note) {
-    const uintptr_t base = Il2CppGetBase();
-    if (!base) {
+    // The image must be read from the lowest mapping, where the ELF header is.
+    // The load bias is a different number whenever the first PT_LOAD does not
+    // start at vaddr 0, and parsing the header at the bias then reads garbage.
+    const uintptr_t moduleBase = Il2CppGetModuleBase();
+    if (!moduleBase) {
         note = "libil2cpp.so not mapped";
         return false;
     }
 
     std::vector<uint8_t> image;
     ElfImage::Info info;
-    if (!ElfReconstructor::BuildImage(base, image, info)) {
+    if (!ElfReconstructor::BuildImage(moduleBase, image, info)) {
         note = "ELF reconstruction failed";
         return false;
     }
@@ -974,6 +1182,13 @@ inline void WriteHookGenerator(const std::string& path) {
         "            if rva_match:\n"
         "                pending_rva = rva_match.group(1)\n"
         "                continue\n"
+        "            # Any other comment ends the pending RVA: (ABSTRACT), no code\n"
+        "            # pointer and signature-unavailable markers all mean the last\n"
+        "            # method is finished. Keeping the value would attach it to the\n"
+        "            # next method, which is a different address entirely.\n"
+        "            if line.lstrip().startswith('//'):\n"
+        "                pending_rva = None\n"
+        "                continue\n"
         "            method_match = METHOD_LINE.match(line)\n"
         "            if method_match and pending_rva:\n"
         "                name = method_match.group(1)\n"
@@ -1070,10 +1285,6 @@ inline void RunFullDump() {
     const std::string dir(dirBuffer);
 
     Il2CppAttach();
-    if (!Il2CppIsReady()) {
-        SetStatus("ERROR: il2cpp API not available");
-        return;
-    }
 
     SafeMemory::Refresh();
     RvaResolver::SetTargetModule("libil2cpp.so");
@@ -1083,22 +1294,24 @@ inline void RunFullDump() {
 
     Snapshot snapshot;
     if (!Collect(snapshot)) {
-        SetStatus("ERROR: no classes enumerated");
+        // Collect() already fell back to the metadata reader; reaching here means
+        // neither route produced a single real class.
+        SetStatus("ERROR: no classes enumerated (api and metadata both failed)");
         return;
     }
 
     g_progress.store(45);
     SetStatus("writing dump.cs");
-    WriteCs(dir + "/dump.cs", snapshot);
+    const bool csOk = WriteCs(dir + "/dump.cs", snapshot);
 
     SetStatus("writing il2cpp.h");
     g_progress.store(60);
-    WriteSdk(dir + "/il2cpp.h", snapshot);
+    const bool sdkOk = WriteSdk(dir + "/il2cpp.h", snapshot);
 
     SetStatus("writing offsets and symbols");
     g_progress.store(70);
-    WriteOffsets(dir + "/ninmods_real_offsets.h", snapshot);
-    WriteScriptJson(dir + "/script.json", snapshot);
+    const bool offsetsOk = WriteOffsets(dir + "/ninmods_real_offsets.h", snapshot);
+    const bool scriptOk  = WriteScriptJson(dir + "/script.json", snapshot);
 
     SetStatus("dumping metadata");
     g_progress.store(80);
@@ -1118,6 +1331,19 @@ inline void RunFullDump() {
     WriteReadme(dir + "/README.txt", metadataNote, elfNote, snapshot);
 
     g_progress.store(100);
+
+    // A dump that could not be written must not be reported as a success: the
+    // status line is the only feedback the user gets.
+    const bool coreOk = csOk && sdkOk && offsetsOk && scriptOk;
+    if (!coreOk) {
+        SetStatusf("INCOMPLETE: write failed (cs=%d sdk=%d offsets=%d script=%d)",
+                   (int)csOk, (int)sdkOk, (int)offsetsOk, (int)scriptOk);
+        __android_log_print(ANDROID_LOG_ERROR, "NINMODS",
+                            "dump incomplete in %s: cs=%d sdk=%d offsets=%d script=%d",
+                            dir.c_str(), (int)csOk, (int)sdkOk, (int)offsetsOk, (int)scriptOk);
+        return;
+    }
+
     SetStatusf("DONE: %s", dir.c_str());
     __android_log_print(ANDROID_LOG_INFO, "NINMODS", "dump complete: %s", dir.c_str());
 }

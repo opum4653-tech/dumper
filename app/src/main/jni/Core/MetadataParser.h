@@ -2,15 +2,23 @@
 
 // Reads global-metadata.dat out of the live process.
 //
-// Two facts that keep this honest:
+// This file only decodes the entry layouts it can pin exactly, and proves the
+// pin before reading a single entry:
 //
-//   1. The header layout is version dependent. Unity 24.x-27.x use the field
-//      order declared below; 29+ rearrange it. Rather than pretend one struct
-//      fits every build, the version field is checked and the section table is
-//      only used when the version falls in the range it actually describes.
-//   2. The size of the blob is taken from the mapping that holds it. That is
-//      the real in-memory extent, so nothing is over-read past the region the
-//      runtime mapped.
+//   1. Unity's metadata header is version dependent and so is the size of every
+//      entry in the tables walked below. Unity inserts and removes ints between
+//      releases (customAttributeIndex, byrefTypeIndex, the rgctx pair,
+//      invokerIndex, ...). Version 24 in particular has at least three different
+//      Il2CppTypeDefinition sizes. Decoding those with one struct reads every
+//      field at the wrong offset and produces names that look real and are not.
+//      So only the 25.x-27.x layout is decoded, and it is accepted only when the
+//      header's own byte sizes agree with it.
+//   2. The header's *Size fields are byte sizes, not element counts. The counts
+//      used below are derived from them, and every index is bounds-checked
+//      against them before it is dereferenced.
+//   3. The blob size comes from the mapping that holds it, so nothing is read
+//      past the region the runtime mapped. A page that cannot be read fails the
+//      read; it is never replaced with zeros.
 
 #include <cstdint>
 #include <cstddef>
@@ -27,51 +35,56 @@ namespace MetadataParser {
 
 static constexpr uint32_t kMetadataMagic = 0xFAB11BAF;
 
-// Field order as published for Unity 24.0 - 27.x.
+// Only the layout that is pinned exactly below is decoded.
+static constexpr int32_t kMinVersion = 25;
+static constexpr int32_t kMaxVersion = 27;
+
+// Every section offset used here sits before the version-conditional tail of the
+// header, so one declaration covers 25.x-27.x. The *Size fields are byte sizes.
 #pragma pack(push, 1)
-struct HeaderV24 {
+struct Header {
     uint32_t magic;
     int32_t  version;
     uint32_t stringLiteralOffset;
-    uint32_t stringLiteralCount;
+    uint32_t stringLiteralSize;
     uint32_t stringLiteralDataOffset;
-    uint32_t stringLiteralDataCount;
+    uint32_t stringLiteralDataSize;
     uint32_t stringOffset;
-    uint32_t stringCount;
+    uint32_t stringSize;
     uint32_t eventsOffset;
-    uint32_t eventsCount;
+    uint32_t eventsSize;
     uint32_t propertiesOffset;
-    uint32_t propertiesCount;
+    uint32_t propertiesSize;
     uint32_t methodsOffset;
-    uint32_t methodsCount;
+    uint32_t methodsSize;
     uint32_t parameterDefaultValuesOffset;
-    uint32_t parameterDefaultValuesCount;
+    uint32_t parameterDefaultValuesSize;
     uint32_t fieldDefaultValuesOffset;
-    uint32_t fieldDefaultValuesCount;
+    uint32_t fieldDefaultValuesSize;
     uint32_t fieldAndParameterDefaultValueDataOffset;
-    uint32_t fieldAndParameterDefaultValueDataCount;
+    uint32_t fieldAndParameterDefaultValueDataSize;
     uint32_t fieldMarshaledSizesOffset;
-    uint32_t fieldMarshaledSizesCount;
+    uint32_t fieldMarshaledSizesSize;
     uint32_t parametersOffset;
-    uint32_t parametersCount;
+    uint32_t parametersSize;
     uint32_t fieldsOffset;
-    uint32_t fieldsCount;
+    uint32_t fieldsSize;
     uint32_t genericParametersOffset;
-    uint32_t genericParametersCount;
+    uint32_t genericParametersSize;
     uint32_t genericParameterConstraintsOffset;
-    uint32_t genericParameterConstraintsCount;
+    uint32_t genericParameterConstraintsSize;
     uint32_t genericContainersOffset;
-    uint32_t genericContainersCount;
+    uint32_t genericContainersSize;
     uint32_t nestedTypesOffset;
-    uint32_t nestedTypesCount;
+    uint32_t nestedTypesSize;
     uint32_t interfacesOffset;
-    uint32_t interfacesCount;
+    uint32_t interfacesSize;
     uint32_t vtableMethodsOffset;
-    uint32_t vtableMethodsCount;
+    uint32_t vtableMethodsSize;
     uint32_t interfaceOffsetsOffset;
-    uint32_t interfaceOffsetsCount;
+    uint32_t interfaceOffsetsSize;
     uint32_t typeDefinitionsOffset;
-    uint32_t typeDefinitionsCount;
+    uint32_t typeDefinitionsSize;
 };
 
 struct StringLiteralEntry {
@@ -79,6 +92,8 @@ struct StringLiteralEntry {
     uint32_t dataIndex;
 };
 
+// Il2CppTypeDefinition as published for 25.x-27.x: 88 bytes. customAttributeIndex,
+// byrefTypeIndex and the rgctx pair are all absent in this range.
 struct TypeDefinitionEntry {
     uint32_t nameIndex;
     uint32_t namespaceIndex;
@@ -108,6 +123,8 @@ struct TypeDefinitionEntry {
     uint32_t token;
 };
 
+// Il2CppMethodDefinition for 25.x-27.x: 32 bytes. customAttributeIndex,
+// methodIndex, invokerIndex, delegateWrapperIndex and the rgctx pair are absent.
 struct MethodDefinitionEntry {
     uint32_t nameIndex;
     uint32_t declaringType;
@@ -121,6 +138,7 @@ struct MethodDefinitionEntry {
     uint16_t parameterCount;
 };
 
+// Il2CppFieldDefinition for 19+: 12 bytes. customAttributeIndex is gone.
 struct FieldDefinitionEntry {
     uint32_t nameIndex;
     uint32_t typeIndex;
@@ -128,14 +146,112 @@ struct FieldDefinitionEntry {
 };
 #pragma pack(pop)
 
+static_assert(sizeof(Header) == 0xA8, "global metadata header prefix layout is wrong");
+static_assert(sizeof(TypeDefinitionEntry) == 88, "Il2CppTypeDefinition 25.x layout is wrong");
+static_assert(sizeof(MethodDefinitionEntry) == 32, "Il2CppMethodDefinition 25.x layout is wrong");
+static_assert(sizeof(FieldDefinitionEntry) == 12, "Il2CppFieldDefinition layout is wrong");
+static_assert(sizeof(StringLiteralEntry) == 8, "Il2CppStringLiteral layout is wrong");
+
+inline bool IsSupportedVersion(int32_t version) {
+    return version >= kMinVersion && version <= kMaxVersion;
+}
+
+// Version-independent view of one type definition. IsValueType / IsEnum come
+// from the bitfield, which is the runtime's own encoding.
+struct TypeDefView {
+    uint32_t nameIndex = 0;
+    uint32_t namespaceIndex = 0;
+    uint32_t flags = 0;
+    uint32_t fieldStart = 0;
+    uint32_t methodStart = 0;
+    uint32_t bitfield = 0;
+    uint16_t fieldCount = 0;
+    uint16_t methodCount = 0;
+
+    bool ValueType() const { return (bitfield & 0x1) != 0; }
+    bool EnumType() const { return ((bitfield >> 1) & 0x1) != 0; }
+};
+
+inline bool ReadTypeDef(uintptr_t address, TypeDefView& out) {
+    out = TypeDefView();
+    TypeDefinitionEntry entry{};
+    if (!SafeMemory::Read(address, &entry, sizeof(entry))) return false;
+    out.nameIndex = entry.nameIndex;
+    out.namespaceIndex = entry.namespaceIndex;
+    out.flags = entry.flags;
+    out.fieldStart = entry.fieldStart;
+    out.methodStart = entry.methodStart;
+    out.bitfield = entry.bitfield;
+    out.fieldCount = entry.field_count;
+    out.methodCount = entry.method_count;
+    return true;
+}
+
+inline bool ReadFieldDef(uintptr_t address, uint32_t& nameIndex) {
+    nameIndex = 0;
+    FieldDefinitionEntry entry{};
+    if (!SafeMemory::Read(address, &entry, sizeof(entry))) return false;
+    nameIndex = entry.nameIndex;
+    return true;
+}
+
+struct MethodDefView {
+    uint32_t nameIndex = 0;
+    uint32_t token = 0;
+    uint16_t flags = 0;
+    uint16_t parameterCount = 0;
+};
+
+inline bool ReadMethodDef(uintptr_t address, MethodDefView& out) {
+    out = MethodDefView();
+    MethodDefinitionEntry entry{};
+    if (!SafeMemory::Read(address, &entry, sizeof(entry))) return false;
+    out.nameIndex = entry.nameIndex;
+    out.token = entry.token;
+    out.flags = entry.flags;
+    out.parameterCount = entry.parameterCount;
+    return true;
+}
+
 struct Located {
     uintptr_t address = 0;
     size_t    size    = 0;
     int32_t   version = 0;
+    Header    header{};
+    size_t    typeCount = 0;
+    size_t    fieldCount = 0;
+    size_t    methodCount = 0;
 };
 
-// Finds the metadata blob by scanning readable mappings for the magic, and
-// reports the mapping extent that contains it.
+// Reads the string a metadata string index refers to. Bounded by stringSize and
+// by the blob's own extent, so a corrupt index cannot walk off the mapping.
+inline bool ReadString(const Located& loc, uint32_t index, char* out, size_t outSize) {
+    if (!out || outSize == 0) return false;
+    out[0] = '\0';
+    if (index >= loc.header.stringSize) return false;
+
+    const uintptr_t base = loc.address + loc.header.stringOffset + index;
+    const uintptr_t blobStart = loc.address;
+    const uintptr_t blobEnd = loc.address + loc.size;
+    if (base < blobStart || base >= blobEnd) return false;
+
+    return SafeMemory::ReadCString(base, out, outSize);
+}
+
+// Confirms that the table byte sizes divide by the entry sizes this file
+// decodes. A mismatch means the build uses a different entry layout, and
+// decoding it anyway would produce names read at the wrong stride.
+inline bool TablesValidate(const Header& header) {
+    if (header.typeDefinitionsSize == 0 || header.methodsSize == 0) return false;
+    if ((header.typeDefinitionsSize % sizeof(TypeDefinitionEntry)) != 0) return false;
+    if ((header.methodsSize % sizeof(MethodDefinitionEntry)) != 0) return false;
+    if (header.fieldsSize != 0 && (header.fieldsSize % sizeof(FieldDefinitionEntry)) != 0) return false;
+    if (header.stringSize == 0) return false;
+    return true;
+}
+
+// Finds the metadata blob by scanning readable mappings for the magic, then
+// validates the header, the version and the entry table sizes.
 inline bool Locate(Located& out) {
     out = Located();
 
@@ -153,9 +269,9 @@ inline bool Locate(Located& out) {
         if (perms[0] != 'r') continue;
         if ((end - start) < 0x1000) continue;
 
-        // The metadata blob is mapped from the start of a mapping, so only the
-        // mapping start needs checking. A fallback scan of the first page is
-        // added because some packers prepend a stub.
+        // The blob is normally mapped from the start of a mapping, so the
+        // mapping start is checked first. A first-page scan covers packers that
+        // prepend a stub.
         uint32_t magic = 0;
         if (SafeMemory::ReadUint32(start, &magic) && magic == kMetadataMagic) {
             hit = start;
@@ -175,17 +291,27 @@ inline bool Locate(Located& out) {
     }
     fclose(fp);
 
-    if (!hit || hitSize < sizeof(HeaderV24)) return false;
+    if (!hit || hitSize < sizeof(Header)) return false;
 
-    HeaderV24 header;
+    Header header{};
     if (!SafeMemory::Read(hit, &header, sizeof(header))) return false;
+    if (header.magic != kMetadataMagic) return false;
+    if (!IsSupportedVersion(header.version)) return false;
+    if (!TablesValidate(header)) return false;
 
-    out.address = hit;
-    out.size    = hitSize;
-    out.version = header.version;
+    out.address     = hit;
+    out.size        = hitSize;
+    out.version     = header.version;
+    out.header      = header;
+    out.typeCount   = header.typeDefinitionsSize / sizeof(TypeDefinitionEntry);
+    out.fieldCount  = header.fieldsSize / sizeof(FieldDefinitionEntry);
+    out.methodCount = header.methodsSize / sizeof(MethodDefinitionEntry);
+    if (out.typeCount == 0 || out.typeCount > 500000) return false;
     return true;
 }
 
+// Copies the blob out verbatim. A page that cannot be read fails the write
+// rather than being padded with invented bytes.
 inline bool WriteRaw(uintptr_t address, size_t size, const char* outPath) {
     int fd = open(outPath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0) return false;
@@ -194,34 +320,33 @@ inline bool WriteRaw(uintptr_t address, size_t size, const char* outPath) {
     std::vector<uint8_t> buffer(kChunk);
 
     size_t done = 0;
+    bool ok = true;
     while (done < size) {
         const size_t step = (size - done > kChunk) ? kChunk : (size - done);
-        if (!SafeMemory::Read(address + done, buffer.data(), step)) {
-            std::memset(buffer.data(), 0, step);
-        }
-        if (write(fd, buffer.data(), step) != (ssize_t)step) {
-            close(fd);
-            return false;
-        }
+        if (!SafeMemory::Read(address + done, buffer.data(), step)) { ok = false; break; }
+        if (write(fd, buffer.data(), step) != (ssize_t)step) { ok = false; break; }
         done += step;
     }
     close(fd);
-    return true;
+
+    if (!ok) unlink(outPath);
+    return ok;
 }
 
-// Emits stringliteral.json. Only valid for the header layout above, so the
-// caller must pass a version this struct describes.
-inline bool DumpStringLiteralsJson(uintptr_t metadataAddress, int32_t version, const char* outJsonPath) {
-    if (version < 24 || version > 27) return false;
+// Emits stringliteral.json. StringLiteralEntry is 8 bytes in every version this
+// file supports, and the data section is bounded by stringLiteralDataSize.
+inline bool DumpStringLiteralsJson(uintptr_t metadataAddress, int32_t version,
+                                   const char* outJsonPath) {
+    if (!IsSupportedVersion(version)) return false;
 
-    HeaderV24 header;
+    Header header{};
     if (!SafeMemory::Read(metadataAddress, &header, sizeof(header))) return false;
     if (header.magic != kMetadataMagic) return false;
-    if (header.stringLiteralOffset == 0 || header.stringLiteralCount == 0) return false;
+    if (header.stringLiteralOffset == 0 || header.stringLiteralSize == 0) return false;
     if (header.stringLiteralDataOffset == 0) return false;
 
-    const size_t entryCount = header.stringLiteralCount / sizeof(StringLiteralEntry);
-    if (entryCount == 0 || entryCount > 200000) return false;
+    const size_t entryCount = header.stringLiteralSize / sizeof(StringLiteralEntry);
+    if (entryCount == 0 || entryCount > 500000) return false;
 
     int fd = open(outJsonPath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0) return false;
@@ -236,12 +361,16 @@ inline bool DumpStringLiteralsJson(uintptr_t metadataAddress, int32_t version, c
     line.reserve(512);
     char text[2048];
     bool first = true;
+    bool ok = true;
 
     for (size_t i = 0; i < entryCount; ++i) {
         StringLiteralEntry entry{};
-        if (!SafeMemory::Read(tableAddress + i * sizeof(entry), &entry, sizeof(entry))) break;
+        if (!SafeMemory::Read(tableAddress + i * sizeof(entry), &entry, sizeof(entry))) {
+            ok = false;
+            break;
+        }
         if (entry.length == 0 || entry.length >= sizeof(text)) continue;
-        if (entry.dataIndex + entry.length > header.stringLiteralDataCount) continue;
+        if (entry.dataIndex + entry.length > header.stringLiteralDataSize) continue;
         if (!SafeMemory::Read(dataAddress + entry.dataIndex, text, entry.length)) continue;
 
         text[entry.length] = '\0';
@@ -253,123 +382,23 @@ inline bool DumpStringLiteralsJson(uintptr_t metadataAddress, int32_t version, c
         line += "\",\n    \"length\": ";
         line += std::to_string(entry.length);
         line += "\n  }";
-        write(fd, line.data(), line.size());
+        if (write(fd, line.data(), line.size()) != (ssize_t)line.size()) { ok = false; break; }
         first = false;
     }
 
-    static const char kClose[] = "\n]\n";
-    write(fd, kClose, sizeof(kClose) - 1);
+    if (ok) {
+        static const char kClose[] = "\n]\n";
+        ok = write(fd, kClose, sizeof(kClose) - 1) == (ssize_t)(sizeof(kClose) - 1);
+    }
     close(fd);
-    return true;
+    if (!ok) unlink(outJsonPath);
+    return ok;
 }
 
-// One-line description of what the metadata dump produced, for the README.
 inline std::string DescribeVersion(int32_t version) {
     char buf[96];
     snprintf(buf, sizeof(buf), "version %d", version);
     return std::string(buf);
-}
-
-// Fallback class dumper: parses global-metadata.dat directly when dynamic symbols
-// are stripped from libil2cpp.so and il2cpp_domain_get returns 0 assemblies.
-inline bool DumpFromMetadata(uintptr_t metadataAddress,
-                             int fdCs, int fdJson, int fdSdk, int fdOff,
-                             uintptr_t baseAddr, size_t moduleSize,
-                             std::atomic<int>& progress,
-                             char* statusBuf, size_t statusSize) {
-    HeaderV24 header;
-    if (!SafeMemory::Read(metadataAddress, &header, sizeof(header))) return false;
-    if (header.magic != kMetadataMagic) return false;
-    if (header.typeDefinitionsOffset == 0 || header.typeDefinitionsCount == 0) return false;
-
-    const size_t typeCount = header.typeDefinitionsCount / sizeof(TypeDefinitionEntry);
-    if (typeCount == 0 || typeCount > 200000) return false;
-
-    const uintptr_t typesAddr = metadataAddress + header.typeDefinitionsOffset;
-    const uintptr_t fieldsAddr = metadataAddress + header.fieldsOffset;
-    const uintptr_t methodsAddr = metadataAddress + header.methodsOffset;
-    const uintptr_t stringsAddr = metadataAddress + header.stringOffset;
-
-    auto readString = [&](uint32_t index) -> std::string {
-        if (index >= header.stringCount) return "";
-        char buf[256];
-        if (SafeMemory::ReadCString(stringsAddr + index, buf, sizeof(buf))) {
-            return std::string(buf);
-        }
-        return "";
-    };
-
-    char chunk[4096];
-
-    for (size_t i = 0; i < typeCount; ++i) {
-        TypeDefinitionEntry td{};
-        if (!SafeMemory::Read(typesAddr + i * sizeof(TypeDefinitionEntry), &td, sizeof(td))) break;
-
-        std::string kName = readString(td.nameIndex);
-        if (kName.empty()) kName = "UnnamedClass_" + std::to_string(i);
-        std::string ns = readString(td.namespaceIndex);
-
-        // dump.cs class start
-        int clen = snprintf(chunk, sizeof(chunk),
-            "// Namespace: %s\npublic class %s\n{\n", ns.c_str(), kName.c_str());
-        write(fdCs, chunk, clen);
-
-        // il2cpp.h struct start
-        int slen = snprintf(chunk, sizeof(chunk),
-            "// [%s] %s\nstruct %s {\n", ns.c_str(), kName.c_str(), kName.c_str());
-        write(fdSdk, chunk, slen);
-
-        // ninmods_real_offsets.h header
-        int olen = snprintf(chunk, sizeof(chunk),
-            "\n// [%s] %s%s%s\n", "METADATA", ns.c_str(), ns.empty() ? "" : ".", kName.c_str());
-        write(fdOff, chunk, olen);
-
-        // Dump Fields
-        write(fdCs, "\t// Fields\n", 11);
-        for (uint16_t f = 0; f < td.field_count; ++f) {
-            uint32_t fIndex = td.fieldStart + f;
-            FieldDefinitionEntry fdEntry{};
-            if (!SafeMemory::Read(fieldsAddr + fIndex * sizeof(FieldDefinitionEntry), &fdEntry, sizeof(fdEntry))) break;
-            std::string fName = readString(fdEntry.nameIndex);
-            if (!fName.empty()) {
-                int flen = snprintf(chunk, sizeof(chunk),
-                    "\tpublic var %s; // FieldDef 0x%08X\n", fName.c_str(), fdEntry.token);
-                write(fdCs, chunk, flen);
-
-                int sflen = snprintf(chunk, sizeof(chunk),
-                    "\tuintptr_t %s; // Token 0x%08X\n", fName.c_str(), fdEntry.token);
-                write(fdSdk, chunk, sflen);
-            }
-        }
-
-        // Dump Methods
-        write(fdCs, "\n\t// Methods\n", 13);
-        for (uint16_t m = 0; m < td.method_count; ++m) {
-            uint32_t mIndex = td.methodStart + m;
-            MethodDefinitionEntry mdEntry{};
-            if (!SafeMemory::Read(methodsAddr + mIndex * sizeof(MethodDefinitionEntry), &mdEntry, sizeof(mdEntry))) break;
-            std::string mName = readString(mdEntry.nameIndex);
-            if (!mName.empty()) {
-                int mlen = snprintf(chunk, sizeof(chunk),
-                    "\t// Token: 0x%08X (RVA: 0x0) (Params: %u)\n\tpublic void %s();\n",
-                    mdEntry.token, mdEntry.parameterCount, mName.c_str());
-                write(fdCs, chunk, mlen);
-            }
-        }
-
-        write(fdCs, "}\n\n", 3);
-        write(fdSdk, "};\n\n", 4);
-
-        if ((i % 100) == 0 || i + 1 == typeCount) {
-            int pct = (int)(((i + 1) * 100) / typeCount);
-            progress.store(pct);
-            if (statusBuf && statusSize > 0) {
-                snprintf(statusBuf, statusSize, "Metadata Fallback: %s (%d%%)...", kName.c_str(), pct);
-            }
-        }
-    }
-
-    return true;
 }
 
 } // namespace MetadataParser

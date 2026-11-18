@@ -16,9 +16,15 @@ void Il2CppAttach();
 bool Il2CppIsReady();
 
 // Load bias of libil2cpp.so: the value that turns a vaddr into a runtime
-// address. 0 when the module is not mapped.
+// address (runtime_address = bias + vaddr). 0 when the module is not mapped.
 uintptr_t Il2CppGetBase();
 void      Il2CppSetBase(uintptr_t base);
+
+// Lowest mapping of libil2cpp.so, i.e. the address the ELF header is mapped at.
+// This is NOT the load bias: it equals bias + align_down(first PT_LOAD vaddr,
+// page). Reading the ELF header, dumping the image and parsing program headers
+// all need this value, never the bias.
+uintptr_t Il2CppGetModuleBase();
 
 // Value of an entry from the API table, by name. Returns nullptr for a name the
 // table does not carry or an export this Unity build does not provide.
@@ -73,6 +79,9 @@ const void*   Il2CppClassGetImage(const void* klass);
 void*         Il2CppClassGetFields(const void* klass, void** iter);
 const char*   Il2CppFieldGetName(const void* field);
 size_t        Il2CppFieldGetOffset(const void* field);
+// True when the build exports il2cpp_field_get_offset. When it does not, no
+// field has a runtime offset and none may be invented.
+bool          Il2CppFieldOffsetAvailable();
 const void*   Il2CppFieldGetType(const void* field);
 int           Il2CppFieldGetFlags(const void* field);
 bool          Il2CppFieldIsLiteral(const void* field);

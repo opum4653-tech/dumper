@@ -114,16 +114,7 @@ namespace Logger {
 
     inline void InstallCrashHandler() {
         Init();
-        struct sigaction sa;
-        memset(&sa, 0, sizeof(sa));
-        sa.sa_sigaction = SignalHandler;
-        sa.sa_flags = SA_SIGINFO;
-        sigaction(SIGSEGV, &sa, nullptr);
-        sigaction(SIGBUS, &sa, nullptr);
-        sigaction(SIGABRT, &sa, nullptr);
-        sigaction(SIGFPE, &sa, nullptr);
-        sigaction(SIGILL, &sa, nullptr);
-        Log("Signal crash handler installed. Active log: %s", s_logPath[0] ? s_logPath : "logcat");
+        Log("Logger initialized. Active log: %s", s_logPath[0] ? s_logPath : "logcat");
     }
 }
 
