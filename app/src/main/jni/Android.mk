@@ -24,7 +24,7 @@ LOCAL_CPPFLAGS := -fvisibility=hidden -ffunction-sections -fdata-sections -w \
                   -std=c++17 -fno-rtti -fno-exceptions
 LOCAL_LDFLAGS += -Wl,--gc-sections -Wl,--strip-all
 
-LOCAL_LDLIBS := -llog -landroid -lEGL -lGLESv2 -lz
+LOCAL_LDLIBS := -llog -landroid -lEGL -lGLESv3 -lGLESv2 -lz
 
 LOCAL_C_INCLUDES := $(LOCAL_PATH) \
                     $(LOCAL_PATH)/include \
