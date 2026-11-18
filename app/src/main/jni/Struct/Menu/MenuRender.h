@@ -10,10 +10,14 @@ typedef unsigned long uintptr_t;
 #endif
 
 #include "../../imgui/imgui.h"
+#include "../../imgui/imgui_internal.h"
 #include "../Core/DumperLifecycle.h"
 #include "../Dumper/Il2CppRealDumper.h"
 #include "../Dumper/OfficialDumperEngine.h"
 #include "../../Icon/TextureLoader.h"
+
+template<typename T>
+static inline T ImClampVal(T v, T mn, T mx) { return (v < mn) ? mn : (v > mx) ? mx : v; }
 
 struct TouchState {
     volatile bool val;

@@ -108,6 +108,12 @@ jobs:
           echo "=== FINAL OUTPUT_LIBS ==="
           ls -la output_libs/* || true
 
+          if [ ! -f "output_libs/arm64-v8a/libNINMODS.so" ] || [ ! -f "output_libs/armeabi-v7a/libNINMODS.so" ]; then
+            echo "::error::CRITICAL: libNINMODS.so missing for one or both ABIs!"
+            exit 1
+          fi
+          echo "SUCCESS: Both arm64-v8a and armeabi-v7a libNINMODS.so binaries verified!"
+
       - name: Upload Native Libraries Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -132,8 +138,10 @@ jobs:
             output_libs/arm64-v8a/libNINMODS.so
             output_libs/armeabi-v7a/libNINMODS.so
             app/build/outputs/apk/release/*.apk
-          tag_name: ${{ github.ref_name }}
-          name: "NINMODS Universal Il2Cpp Dumper ${{ github.ref_name }}"
+          tag_name: "v1.0.0"
+          name: "NINMODS Universal Il2Cpp Dumper v1.0.0"
+          draft: false
+          prerelease: false
           body: |
             ## NINMODS In-Memory Il2Cpp Dumper & Live Inspector
             - **Native Injected Library**: `libNINMODS.so` (arm64-v8a & armeabi-v7a)

@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <cstring>
 #include <string>
 #include <vector>

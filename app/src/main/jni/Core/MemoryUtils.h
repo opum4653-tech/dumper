@@ -2,61 +2,42 @@
 #define MEMORY_UTILS_H
 
 #include <cstdint>
-#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <unistd.h>
-#include <algorithm>
-#include "../KittyMemory/MemoryPatch.h"
-#include "../Struct/obfuscate.h"
-#include "../xdl/include/xdl.h"
 
-// Check if pointer is safely readable
-inline bool IsValidPointer(void* ptr) {
-    uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-#if defined(__LP64__) || defined(_LP64)
-    return (addr >= 0x10000000 && addr <= 0x7FFFFFFFFFFF);
-#else
-    return (addr >= 0x10000000 && addr <= 0xFFFFFFFF);
-#endif
-}
-
-// Clamp float utility
-inline float ClampFloat(float val, float minVal, float maxVal) {
-    return std::clamp(val, minVal, maxVal);
-}
-
-// Universal module base resolver (Linker xdl -> Kernel /proc/self/maps fallback)
+// Module base resolver for the current process.
+// Primary path: /proc/self/maps (no dependency on a linker wrapper).
+// The first read-executable map matching the name is the load bias.
 inline uintptr_t GetModuleBase(const char* moduleName) {
     if (!moduleName || moduleName[0] == '\0') return 0;
 
-    // 1. Linker resolution via xdl
-    void* handle = xdl_open(moduleName, 0);
-    if (handle) {
-        xdl_info_t info;
-        if (xdl_info(handle, XDL_DI_DLINFO, &info) == 0 && info.dli_fbase) {
-            xdl_close(handle);
-            return (uintptr_t)info.dli_fbase;
-        }
-        xdl_close(handle);
-    }
-
-    // 2. Fallback: Parse /proc/self/maps
     FILE* fp = fopen("/proc/self/maps", "r");
-    if (fp) {
-        char line[512];
-        while (fgets(line, sizeof(line), fp)) {
-            if (strstr(line, moduleName)) {
-                uintptr_t start = 0;
-                if (sscanf(line, "%lx-", &start) == 1) {
-                    fclose(fp);
-                    return start;
-                }
-            }
+    if (!fp) return 0;
+
+    char line[512];
+    uintptr_t result = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (!strstr(line, moduleName)) continue;
+
+        uintptr_t start = 0;
+        char perms[5] = {0};
+        if (sscanf(line, "%lx-%*lx %4s", &start, perms) != 2) continue;
+
+        // Load bias is the start of the first mapping that owns the file.
+        if (strchr(perms, 'x') || start != 0) {
+            result = start;
+            break;
         }
-        fclose(fp);
     }
-    return 0;
+    fclose(fp);
+    return result;
+}
+
+// Overload used by the lifecycle bootstrap (pid is always self here).
+inline uintptr_t get_module_base(pid_t pid, const char* moduleName) {
+    if (pid != getpid()) return 0;
+    return GetModuleBase(moduleName);
 }
 
 #endif // MEMORY_UTILS_H

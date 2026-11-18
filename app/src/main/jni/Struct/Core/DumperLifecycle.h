@@ -5,6 +5,7 @@
 #include "../../Unity/Il2Cpp.h"
 #include "../../Protection/CrashLogger.h"
 #include "../../KittyMemory/KittyMemory.h"
+#include "../../Core/MemoryUtils.h"
 
 extern uintptr_t il2cpp_base;
 
@@ -19,11 +20,10 @@ inline void EnsureIl2CppReady() {
     static std::once_flag s_once;
     std::call_once(s_once, []() {
         Logger::Log("EnsureIl2CppReady: Attaching to live Il2Cpp runtime...");
-        pid_t pid = getpid();
         uintptr_t base = 0;
         int tries = 0;
         while (base == 0 && tries < 60) {
-            base = get_module_base(pid, "libil2cpp.so");
+            base = GetModuleBase("libil2cpp.so");
             if (!base) { usleep(50000); tries++; }
         }
         if (!base) {

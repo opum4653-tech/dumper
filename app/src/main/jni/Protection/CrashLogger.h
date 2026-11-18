@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <ucontext.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <android/log.h>
 
 namespace Logger {
