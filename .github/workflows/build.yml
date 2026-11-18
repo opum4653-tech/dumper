@@ -44,7 +44,17 @@ jobs:
           echo "============================================================"
           echo "Building NINMODS native libraries (arm64-v8a & armeabi-v7a)..."
           echo "============================================================"
-          ndk-build -C app/src/main -j$(nproc) V=1
+          export NDK_BIN="ndk-build"
+          if command -v ndk-build &> /dev/null; then
+            NDK_BIN="ndk-build"
+          elif [ -n "$ANDROID_NDK_ROOT" ] && [ -f "$ANDROID_NDK_ROOT/ndk-build" ]; then
+            NDK_BIN="$ANDROID_NDK_ROOT/ndk-build"
+          elif [ -n "$ANDROID_NDK_HOME" ] && [ -f "$ANDROID_NDK_HOME/ndk-build" ]; then
+            NDK_BIN="$ANDROID_NDK_HOME/ndk-build"
+          fi
+          echo "Using NDK binary: $NDK_BIN"
+          
+          $NDK_BIN -C app/src/main -j$(nproc) V=1 2>&1 | tee ndk_build.log
           
           mkdir -p output_libs/arm64-v8a
           mkdir -p output_libs/armeabi-v7a
@@ -58,6 +68,14 @@ jobs:
             cp "app/src/main/libs/armeabi-v7a/libNINMODS.so" output_libs/armeabi-v7a/
             echo "[OK] Found libNINMODS.so for armeabi-v7a"
           fi
+
+      - name: Upload NDK Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ndk-build-log
+          path: ndk_build.log
+          if-no-files-found: ignore
 
       - name: Grant Execute Permission to Gradlew
         run: chmod +x gradlew
