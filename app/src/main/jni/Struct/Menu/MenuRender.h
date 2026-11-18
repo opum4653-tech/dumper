@@ -1,27 +1,35 @@
-// Main overlay window: dump suite buttons + live class/offset inspector.
+// MenuRender.h - the overlay window.
+//
+// Two panels: the dump engine and the live inspector. Every value the inspector
+// shows is queried from the running runtime at draw time, so a field offset or
+// an RVA that appears here is the same number the dump writes to disk.
+
 #pragma once
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <unistd.h>
 
 #include "../../imgui/imgui.h"
 #include "../../imgui/imgui_internal.h"
 #include "../../Icon/TextureLoader.h"
 #include "../Core/DumperLifecycle.h"
-#include "../Dumper/Il2CppRealDumper.h"
-#include "../Dumper/OfficialDumperEngine.h"
+#include "../Dumper/Il2CppDumper.h"
 
-template<typename T>
-static inline T ImClampVal(T v, T mn, T mx) { return (v < mn) ? mn : (v > mx) ? mx : v; }
+namespace MenuTheme {
 
-static ImVec2 g_MenuPos(30.0f, 30.0f);
-static float  g_MenuWidth  = 440.0f;
-static float  g_MenuHeight = 520.0f;
+inline ImVec2 g_position(30.0f, 30.0f);
+inline float  g_width  = 440.0f;
+inline float  g_height = 520.0f;
 
-static void PushMenuStyle() {
+inline float Clamp(float value, float low, float high) {
+    return (value < low) ? low : (value > high) ? high : value;
+}
+
+inline void Push() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.2f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
@@ -30,18 +38,14 @@ static void PushMenuStyle() {
     ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 8.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 18.0f);
 
-    ImGui::PushStyleColor(ImGuiCol_WindowBg,             ImVec4(0.02f, 0.03f, 0.05f, 0.88f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,             ImVec4(0.02f, 0.03f, 0.05f, 0.90f));
     ImGui::PushStyleColor(ImGuiCol_Border,               ImVec4(0.35f, 0.55f, 0.85f, 0.45f));
-    ImGui::PushStyleColor(ImGuiCol_TitleBg,              ImVec4(0.07f, 0.10f, 0.16f, 0.85f));
-    ImGui::PushStyleColor(ImGuiCol_TitleBgActive,        ImVec4(0.10f, 0.15f, 0.24f, 0.95f));
     ImGui::PushStyleColor(ImGuiCol_Header,               ImVec4(0.14f, 0.24f, 0.38f, 0.65f));
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered,        ImVec4(0.20f, 0.35f, 0.55f, 0.80f));
     ImGui::PushStyleColor(ImGuiCol_HeaderActive,         ImVec4(0.25f, 0.45f, 0.70f, 0.90f));
     ImGui::PushStyleColor(ImGuiCol_FrameBg,              ImVec4(0.09f, 0.14f, 0.22f, 0.85f));
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,       ImVec4(0.14f, 0.22f, 0.34f, 0.95f));
     ImGui::PushStyleColor(ImGuiCol_FrameBgActive,        ImVec4(0.18f, 0.28f, 0.42f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrab,           ImVec4(0.95f, 0.98f, 1.00f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive,     ImVec4(0.25f, 0.65f, 1.00f, 1.00f));
     ImGui::PushStyleColor(ImGuiCol_Button,               ImVec4(0.14f, 0.24f, 0.38f, 0.75f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,        ImVec4(0.20f, 0.36f, 0.56f, 0.90f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive,         ImVec4(0.26f, 0.46f, 0.72f, 1.00f));
@@ -49,297 +53,351 @@ static void PushMenuStyle() {
     ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab,        ImVec4(0.25f, 0.35f, 0.50f, 0.70f));
     ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0.35f, 0.48f, 0.68f, 0.85f));
     ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive,  ImVec4(0.45f, 0.60f, 0.82f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_TextDisabled,         ImVec4(0.50f, 0.55f, 0.62f, 0.85f));
 }
 
-static void DrawMenuChrome(ImDrawList* dl, ImVec2 winPos, ImVec2 winSize,
-                           ImVec2 closeBtnPos, bool overClose, float headerH) {
-    dl->AddRectFilled(winPos, ImVec2(winPos.x + winSize.x, winPos.y + headerH),
-                      IM_COL32(14, 18, 26, 250), 10.0f, ImDrawFlags_RoundCornersTop);
-    dl->AddLine(ImVec2(winPos.x, winPos.y + headerH),
-                ImVec2(winPos.x + winSize.x, winPos.y + headerH),
-                IM_COL32(60, 90, 140, 180), 1.0f);
+inline void Pop() {
+    ImGui::PopStyleColor(16);
+    ImGui::PopStyleVar(7);
+}
 
-    if (g_NinLogoTexture == 0) LoadNinLogoTexture();
-    if (g_NinLogoTexture != 0) {
-        float aspect = (g_NinLogoHeight > 0)
-            ? ((float)g_NinLogoWidth / (float)g_NinLogoHeight) : 2.5f;
-        float hLogoH = 92.0f;
-        float hLogoW = hLogoH * aspect;
-        float hLogoX = winPos.x + (winSize.x - hLogoW) * 0.5f;
-        float hLogoY = winPos.y + headerH - hLogoH;
-        dl->PushClipRectFullScreen();
-        dl->AddImage((ImTextureID)(intptr_t)g_NinLogoTexture,
-                     ImVec2(hLogoX, hLogoY), ImVec2(hLogoX + hLogoW, hLogoY + hLogoH),
-                     ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, 255));
-        dl->PopClipRect();
+} // namespace MenuTheme
+
+// ---------------------------------------------------------------------------
+// Live class search
+// ---------------------------------------------------------------------------
+struct ClassHit {
+    const void* klass = nullptr;
+    char name[96] = {0};
+    char namespaze[96] = {0};
+    char image[64] = {0};
+};
+
+inline bool ContainsInsensitive(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return false;
+    if (!needle[0]) return true;
+    for (const char* h = haystack; *h; ++h) {
+        const char* a = h;
+        const char* b = needle;
+        while (*a && *b) {
+            char ca = (*a >= 'A' && *a <= 'Z') ? (char)(*a + 32) : *a;
+            char cb = (*b >= 'A' && *b <= 'Z') ? (char)(*b + 32) : *b;
+            if (ca != cb) break;
+            ++a;
+            ++b;
+        }
+        if (!*b) return true;
     }
-
-    dl->AddRectFilled(closeBtnPos, ImVec2(closeBtnPos.x + 24.0f, closeBtnPos.y + 24.0f),
-                      overClose ? IM_COL32(220, 50, 60, 200) : IM_COL32(50, 65, 88, 140), 6.0f);
-    dl->AddLine(ImVec2(closeBtnPos.x + 7.0f,  closeBtnPos.y + 7.0f),
-                ImVec2(closeBtnPos.x + 17.0f, closeBtnPos.y + 17.0f),
-                IM_COL32(255, 255, 255, 240), 2.0f);
-    dl->AddLine(ImVec2(closeBtnPos.x + 17.0f, closeBtnPos.y + 7.0f),
-                ImVec2(closeBtnPos.x + 7.0f,  closeBtnPos.y + 17.0f),
-                IM_COL32(255, 255, 255, 240), 2.0f);
+    return false;
 }
 
-static void DrawDumpControls() {
-    float btnW = (ImGui::GetContentRegionAvail().x - 8.0f) * 0.5f;
-    const bool busy = OfficialDumper::IsDumping() || RealDumper::IsDumping();
+// Searches every image the runtime exposes. Enumeration is cached inside the
+// il2cpp layer, so repeating a query is cheap.
+inline void SearchClasses(const char* query, size_t limit, std::vector<ClassHit>& out) {
+    out.clear();
+    if (!query || !query[0]) return;
 
-    if (busy) {
-        const int pct = OfficialDumper::IsDumping()
-            ? OfficialDumper::GetProgress() : RealDumper::GetProgress();
-        const char* st = OfficialDumper::IsDumping()
-            ? OfficialDumper::GetStatus() : RealDumper::GetStatus();
+    const size_t assemblyCount = Il2CppGetAssemblyCount();
+    for (size_t a = 0; a < assemblyCount && out.size() < limit; ++a) {
+        const void* image = Il2CppAssemblyGetImage(Il2CppGetAssembly(a));
+        if (!image) continue;
 
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.2f, 0.5f));
-        ImGui::Button("DUMPING IN PROGRESS...", ImVec2(-1, 36.0f));
+        const char* imageName = Il2CppImageGetName(image);
+        const size_t classCount = Il2CppImageGetClassCount(image);
+
+        for (size_t c = 0; c < classCount && out.size() < limit; ++c) {
+            const void* klass = Il2CppImageGetClass(image, c);
+            if (!klass) continue;
+
+            const char* name = Il2CppClassGetName(klass);
+            if (!name || !name[0]) continue;
+            if (!ContainsInsensitive(name, query)) continue;
+
+            ClassHit hit;
+            hit.klass = klass;
+            snprintf(hit.name, sizeof(hit.name), "%s", name);
+            const char* ns = Il2CppClassGetNamespace(klass);
+            snprintf(hit.namespaze, sizeof(hit.namespaze), "%s", ns ? ns : "");
+            snprintf(hit.image, sizeof(hit.image), "%s", imageName ? imageName : "");
+            out.push_back(hit);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dump controls
+// ---------------------------------------------------------------------------
+inline void DrawDumpControls() {
+    if (Dumper::Busy()) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.20f, 0.20f, 0.55f));
+        ImGui::Button("DUMPING...", ImVec2(-1, 38.0f));
         ImGui::PopStyleColor();
-
-        ImGui::ProgressBar((float)pct / 100.0f, ImVec2(-1, 18.0f));
-        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), "%s", st);
+        ImGui::ProgressBar((float)Dumper::Progress() / 100.0f, ImVec2(-1, 18.0f));
+        ImGui::TextColored(ImVec4(0.40f, 1.00f, 0.60f, 1.00f), "%s", Dumper::Status());
         return;
     }
 
     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.55f, 0.22f, 0.12f, 0.90f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.70f, 0.30f, 0.16f, 1.00f));
-    if (ImGui::Button("DUMP OFFICIAL SUITE (CS + JSON + SDK + PY)", ImVec2(-1, 38.0f))) {
-        OfficialDumper::TriggerOfficialDumpSuiteAsync();
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.80f, 0.36f, 0.20f, 1.00f));
+    if (ImGui::Button("RUN FULL DUMP", ImVec2(-1, 40.0f))) {
+        Dumper::TriggerFullDump();
     }
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor(3);
+
+    const char* status = Dumper::Status();
+    if (status[0] && strcmp(status, "IDLE") != 0) {
+        ImGui::TextColored(ImVec4(0.90f, 0.85f, 0.40f, 1.00f), "%s", status);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Live inspector
+// ---------------------------------------------------------------------------
+inline void DrawInspector() {
+    static char query[64] = "Player";
+    static const void* selected = nullptr;
+    static char selectedName[96] = "";
+    static char selectedNamespace[96] = "";
+
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##query", "class name filter", query, sizeof(query));
+
+    static const char* kPresets[] = { "Player", "Weapon", "Camera", "Manager" };
+    for (int i = 0; i < 4; ++i) {
+        if (i) ImGui::SameLine();
+        if (ImGui::SmallButton(kPresets[i])) {
+            snprintf(query, sizeof(query), "%s", kPresets[i]);
+            selected = nullptr;
+        }
+    }
+
+    std::vector<ClassHit> hits;
+    SearchClasses(query, 24, hits);
+
+    if (hits.empty()) {
+        ImGui::TextColored(ImVec4(0.85f, 0.45f, 0.45f, 0.85f), "no class matched");
+    } else {
+        ImGui::BeginChild("##hits", ImVec2(-1, 96.0f), true, ImGuiWindowFlags_HorizontalScrollbar);
+        for (const ClassHit& hit : hits) {
+            char label[320];
+            snprintf(label, sizeof(label), "%s%s%s  [%s]",
+                     hit.namespaze, hit.namespaze[0] ? "." : "", hit.name, hit.image);
+            if (ImGui::Selectable(label, selected == hit.klass)) {
+                selected = hit.klass;
+                snprintf(selectedName, sizeof(selectedName), "%s", hit.name);
+                snprintf(selectedNamespace, sizeof(selectedNamespace), "%s", hit.namespaze);
+            }
+        }
+        ImGui::EndChild();
+    }
+
+    if (!selected) return;
 
     ImGui::Spacing();
+    ImGui::TextColored(ImVec4(0.35f, 1.00f, 0.65f, 1.00f), "%s%s%s",
+                       selectedNamespace, selectedNamespace[0] ? "." : "", selectedName);
 
-    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.12f, 0.42f, 0.25f, 0.85f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.16f, 0.56f, 0.32f, 0.95f));
-    if (ImGui::Button("DUMP.CS", ImVec2(btnW, 34.0f))) {
-        RealDumper::TriggerFullCsDumpAsync();
+    if (ImGui::CollapsingHeader("FIELDS", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::BeginChild("##fields", ImVec2(-1, 132.0f), true);
+        void* iter = nullptr;
+        int count = 0;
+        while (void* field = Il2CppClassGetFields(selected, &iter)) {
+            const char* name = Il2CppFieldGetName(field);
+            if (!name || !name[0]) continue;
+
+            const void* type = Il2CppFieldGetType(field);
+            const char* typeName = Il2CppTypeGetName(type);
+
+            ImGui::TextColored(ImVec4(1.00f, 0.85f, 0.35f, 1.00f), "+0x%zx", Il2CppFieldGetOffset(field));
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.60f, 0.80f, 1.00f, 1.00f), "[%s]", (typeName && typeName[0]) ? typeName : "?");
+            ImGui::SameLine();
+            ImGui::Text("%s", name);
+            ++count;
+        }
+        if (!count) {
+            ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 0.85f), "no instance fields");
+        }
+        ImGui::EndChild();
     }
-    ImGui::PopStyleColor(2);
 
-    ImGui::SameLine();
+    if (ImGui::CollapsingHeader("METHODS", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::BeginChild("##methods", ImVec2(-1, 132.0f), true);
+        void* iter = nullptr;
+        int count = 0;
+        while (const void* method = Il2CppClassGetMethods(selected, &iter)) {
+            const char* name = Il2CppMethodGetName(method);
+            if (!name || !name[0]) continue;
 
-    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.18f, 0.32f, 0.58f, 0.85f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.42f, 0.72f, 0.95f));
-    if (ImGui::Button("GROUPED C++", ImVec2(btnW, 34.0f))) {
-        RealDumper::TriggerGroupedOffsetsDumpAsync();
+            void* code = Il2CppMethodGetPointer(method);
+            if (code) {
+                const RvaResolver::Location location = RvaResolver::Resolve((uintptr_t)code);
+                if (location.insideModule) {
+                    ImGui::TextColored(ImVec4(0.30f, 1.00f, 0.55f, 1.00f), "RVA 0x%llx",
+                                       (unsigned long long)location.rva);
+                } else {
+                    ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.25f, 1.00f), "EXT %s",
+                                       location.moduleName.c_str());
+                }
+            } else {
+                ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 0.85f), "no body");
+            }
+
+            ImGui::SameLine();
+            ImGui::Text("%s(%u)", name, Il2CppMethodGetParamCount(method));
+            ++count;
+        }
+        if (!count) {
+            ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 0.85f), "no methods");
+        }
+        ImGui::EndChild();
     }
-    ImGui::PopStyleColor(2);
+}
 
-    if (OfficialDumper::GetStatus()[0] != '\0' && strcmp(OfficialDumper::GetStatus(), "IDLE") != 0) {
-        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.4f, 1.0f), "%s", OfficialDumper::GetStatus());
-    } else if (RealDumper::GetStatus()[0] != '\0' && strcmp(RealDumper::GetStatus(), "IDLE") != 0) {
-        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.4f, 1.0f), "%s", RealDumper::GetStatus());
+// ---------------------------------------------------------------------------
+// Chrome
+// ---------------------------------------------------------------------------
+inline void DrawHeaderBar(ImDrawList* drawList, ImVec2 windowPos, ImVec2 windowSize,
+                          ImVec2 closePos, bool overClose, float headerHeight) {
+    drawList->AddRectFilled(windowPos,
+                            ImVec2(windowPos.x + windowSize.x, windowPos.y + headerHeight),
+                            IM_COL32(14, 18, 26, 250), 10.0f, ImDrawFlags_RoundCornersTop);
+    drawList->AddLine(ImVec2(windowPos.x, windowPos.y + headerHeight),
+                      ImVec2(windowPos.x + windowSize.x, windowPos.y + headerHeight),
+                      IM_COL32(60, 90, 140, 180), 1.0f);
+
+    if (g_NinLogoTexture == 0) LoadNinLogoTexture();
+    if (g_NinLogoTexture != 0) {
+        const float aspect = (g_NinLogoHeight > 0)
+            ? ((float)g_NinLogoWidth / (float)g_NinLogoHeight) : 2.5f;
+        const float logoHeight = 92.0f;
+        const float logoWidth = logoHeight * aspect;
+        const float logoX = windowPos.x + (windowSize.x - logoWidth) * 0.5f;
+        const float logoY = windowPos.y + headerHeight - logoHeight;
+        drawList->PushClipRectFullScreen();
+        drawList->AddImage((ImTextureID)(intptr_t)g_NinLogoTexture,
+                           ImVec2(logoX, logoY), ImVec2(logoX + logoWidth, logoY + logoHeight),
+                           ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, 255));
+        drawList->PopClipRect();
     }
+
+    drawList->AddRectFilled(closePos, ImVec2(closePos.x + 24.0f, closePos.y + 24.0f),
+                            overClose ? IM_COL32(220, 50, 60, 200) : IM_COL32(50, 65, 88, 140), 6.0f);
+    drawList->AddLine(ImVec2(closePos.x + 7.0f,  closePos.y + 7.0f),
+                      ImVec2(closePos.x + 17.0f, closePos.y + 17.0f),
+                      IM_COL32(255, 255, 255, 240), 2.0f);
+    drawList->AddLine(ImVec2(closePos.x + 17.0f, closePos.y + 7.0f),
+                      ImVec2(closePos.x + 7.0f,  closePos.y + 17.0f),
+                      IM_COL32(255, 255, 255, 240), 2.0f);
 }
 
 inline void RenderMainModMenu(bool& menuOpen, int& currentTab) {
     (void)currentTab;
 
-    const float screenW = (ImGui::GetIO().DisplaySize.x > 0.0f)
+    const float screenWidth = (ImGui::GetIO().DisplaySize.x > 0.0f)
         ? ImGui::GetIO().DisplaySize.x : (float)g_GlWidth;
-    const float screenH = (ImGui::GetIO().DisplaySize.y > 0.0f)
+    const float screenHeight = (ImGui::GetIO().DisplaySize.y > 0.0f)
         ? ImGui::GetIO().DisplaySize.y : (float)g_GlHeight;
 
-    g_MenuHeight = (screenH > 0.0f) ? (screenH * 0.72f) : 480.0f;
-    if (g_MenuHeight < 360.0f) g_MenuHeight = 360.0f;
-    g_MenuWidth = (screenW > 460.0f) ? 440.0f : (screenW - 20.0f);
+    MenuTheme::g_height = (screenHeight > 0.0f) ? (screenHeight * 0.74f) : 500.0f;
+    if (MenuTheme::g_height < 380.0f) MenuTheme::g_height = 380.0f;
+    MenuTheme::g_width = (screenWidth > 460.0f) ? 440.0f : (screenWidth - 20.0f);
+    if (MenuTheme::g_width < 260.0f) MenuTheme::g_width = 260.0f;
 
-    const float maxX = (screenW > g_MenuWidth)  ? (screenW - g_MenuWidth)  : 0.0f;
-    const float maxY = (screenH > g_MenuHeight) ? (screenH - g_MenuHeight) : 0.0f;
-    g_MenuPos.x = ImClampVal(g_MenuPos.x, 0.0f, maxX);
-    g_MenuPos.y = ImClampVal(g_MenuPos.y, 40.0f, maxY);
+    const float maxX = (screenWidth > MenuTheme::g_width) ? (screenWidth - MenuTheme::g_width) : 0.0f;
+    const float maxY = (screenHeight > MenuTheme::g_height) ? (screenHeight - MenuTheme::g_height) : 0.0f;
+    MenuTheme::g_position.x = MenuTheme::Clamp(MenuTheme::g_position.x, 0.0f, maxX);
+    MenuTheme::g_position.y = MenuTheme::Clamp(MenuTheme::g_position.y, 20.0f, maxY);
 
-    ImGui::SetNextWindowPos(g_MenuPos, ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(g_MenuWidth, g_MenuHeight), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(MenuTheme::g_position, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(MenuTheme::g_width, MenuTheme::g_height), ImGuiCond_Always);
 
-    PushMenuStyle();
+    MenuTheme::Push();
 
-    if (ImGui::Begin("##NINMODS_REAL_INSPECTOR", &menuOpen,
+    if (ImGui::Begin("##NINMODS", &menuOpen,
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
-                     ImGuiWindowFlags_NoMove)) {
-        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
 
-        const float headerH = 44.0f;
-        const ImVec2 winPos  = ImGui::GetWindowPos();
-        const ImVec2 winSize = ImGui::GetWindowSize();
-        const ImVec2 mouse   = ImGui::GetIO().MousePos;
-        const ImVec2 closeBtnPos(winPos.x + winSize.x - 34.0f,
-                                 winPos.y + (headerH - 24.0f) * 0.5f);
+        ImGui::PushItemWidth(-1.0f);
 
-        const bool overClose =
-            (mouse.x >= closeBtnPos.x && mouse.x <= closeBtnPos.x + 24.0f &&
-             mouse.y >= closeBtnPos.y && mouse.y <= closeBtnPos.y + 24.0f);
-        const bool overTitleBar =
-            (mouse.y >= winPos.y - 48.0f && mouse.y <= winPos.y + headerH &&
-             mouse.x >= winPos.x && mouse.x < closeBtnPos.x);
-        const bool overBody =
-            (mouse.x >= winPos.x && mouse.x <= winPos.x + winSize.x &&
-             mouse.y >= winPos.y && mouse.y <= winPos.y + winSize.y);
+        constexpr float kHeaderHeight = 44.0f;
+        const ImVec2 windowPos  = ImGui::GetWindowPos();
+        const ImVec2 windowSize = ImGui::GetWindowSize();
+        const ImVec2 mouse      = ImGui::GetIO().MousePos;
+        const ImVec2 closePos(windowPos.x + windowSize.x - 34.0f,
+                              windowPos.y + (kHeaderHeight - 24.0f) * 0.5f);
+
+        const bool overClose = (mouse.x >= closePos.x && mouse.x <= closePos.x + 24.0f &&
+                                mouse.y >= closePos.y && mouse.y <= closePos.y + 24.0f);
+        const bool overHeader = (mouse.y >= windowPos.y - 40.0f && mouse.y <= windowPos.y + kHeaderHeight &&
+                                 mouse.x >= windowPos.x && mouse.x < closePos.x);
+        const bool overBody = (mouse.x >= windowPos.x && mouse.x <= windowPos.x + windowSize.x &&
+                               mouse.y >= windowPos.y && mouse.y <= windowPos.y + windowSize.y);
 
         if (ImGui::IsMouseClicked(0) && overClose) menuOpen = false;
 
-        static bool s_dragTitle = false, s_dragBody = false;
+        static bool draggingHeader = false;
+        static bool scrollingBody = false;
         if (ImGui::IsMouseClicked(0)) {
-            if (overTitleBar)      { s_dragTitle = true;  s_dragBody = false; }
-            else if (overBody)     { s_dragTitle = false; s_dragBody = true;  }
+            draggingHeader = overHeader;
+            scrollingBody = overBody && !overHeader;
         }
-        if (ImGui::IsMouseReleased(0)) { s_dragTitle = false; s_dragBody = false; }
+        if (ImGui::IsMouseReleased(0)) {
+            draggingHeader = false;
+            scrollingBody = false;
+        }
 
-        if (s_dragTitle && ImGui::IsMouseDragging(0, 1.0f)) {
-            const ImVec2 delta = ImGui::GetIO().MouseDelta;
-            g_MenuPos.x = ImClampVal(g_MenuPos.x + delta.x, 0.0f, maxX);
-            g_MenuPos.y = ImClampVal(g_MenuPos.y + delta.y, 0.0f, maxY);
-        } else if (s_dragBody && ImGui::IsMouseDragging(0, 2.0f)) {
+        if (draggingHeader && ImGui::IsMouseDragging(0, 1.0f)) {
+            MenuTheme::g_position.x = MenuTheme::Clamp(MenuTheme::g_position.x + ImGui::GetIO().MouseDelta.x, 0.0f, maxX);
+            MenuTheme::g_position.y = MenuTheme::Clamp(MenuTheme::g_position.y + ImGui::GetIO().MouseDelta.y, 20.0f, maxY);
+        } else if (scrollingBody && ImGui::IsMouseDragging(0, 2.0f)) {
             ImGui::SetScrollY(ImGui::GetScrollY() - ImGui::GetIO().MouseDelta.y);
         }
 
-        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
 
-        // Body watermark
         if (g_NinLogoTexture == 0) LoadNinLogoTexture();
         if (g_NinLogoTexture != 0) {
-            const float bodyW = winSize.x, bodyH = winSize.y - headerH;
+            const float bodyWidth = windowSize.x;
+            const float bodyHeight = windowSize.y - kHeaderHeight;
             const float aspect = (g_NinLogoHeight > 0)
                 ? ((float)g_NinLogoWidth / (float)g_NinLogoHeight) : 1.0f;
-            const float logoW = bodyW * 0.88f, logoH = logoW / aspect;
-            const float logoX = winPos.x + (bodyW - logoW) * 0.5f;
-            const float logoY = winPos.y + headerH + (bodyH - logoH) * 0.5f;
+            const float logoWidth = bodyWidth * 0.88f;
+            const float logoHeight = logoWidth / aspect;
+            const float logoX = windowPos.x + (bodyWidth - logoWidth) * 0.5f;
+            const float logoY = windowPos.y + kHeaderHeight + (bodyHeight - logoHeight) * 0.5f;
 
-            dl->PushClipRect(ImVec2(winPos.x, winPos.y + headerH),
-                             ImVec2(winPos.x + winSize.x, winPos.y + winSize.y), true);
-            dl->AddImage((ImTextureID)(intptr_t)g_NinLogoTexture,
-                         ImVec2(logoX, logoY), ImVec2(logoX + logoW, logoY + logoH),
-                         ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, 60));
-            dl->PopClipRect();
+            drawList->PushClipRect(ImVec2(windowPos.x, windowPos.y + kHeaderHeight),
+                                   ImVec2(windowPos.x + windowSize.x, windowPos.y + windowSize.y), true);
+            drawList->AddImage((ImTextureID)(intptr_t)g_NinLogoTexture,
+                               ImVec2(logoX, logoY), ImVec2(logoX + logoWidth, logoY + logoHeight),
+                               ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, 55));
+            drawList->PopClipRect();
         }
 
-        ImGui::SetCursorPosY(headerH + 6.0f);
+        ImGui::SetCursorPosY(kHeaderHeight + 6.0f);
 
-        // ---- runtime status ----
-        static const std::string s_pkg = OfficialDumper::GetCurrentPackageName();
-        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "IL2CPP UNIVERSAL LIVE DUMPER");
-        ImGui::TextColored(ImVec4(0.40f, 1.0f, 0.60f, 1.0f),
-                           "Target: %s (PID: %d)", s_pkg.c_str(), (int)getpid());
-        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.90f, 0.90f),
-                           "Base: 0x%lx | Assemblies: %zu",
-                           (unsigned long)il2cpp_base, Il2CppGetAssemblyCount());
+        static const std::string s_package = Dumper::TargetPackage();
+        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.00f, 1.00f), "IL2CPP LIVE DUMPER");
+        ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.95f, 0.90f), "%s  (pid %d)",
+                           s_package.c_str(), (int)getpid());
+        ImGui::TextColored(ImVec4(0.75f, 0.80f, 0.85f, 0.90f),
+                           "base 0x%lx   assemblies %zu   enum %s",
+                           (unsigned long)Il2CppGetBase(),
+                           Il2CppGetAssemblyCount(),
+                           Il2CppEnumerationMode());
         ImGui::Separator();
 
-        // ---- dump engine ----
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.30f, 1.0f),
-                           "DUMP ENGINE (no PC tools required):");
+        ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.30f, 1.00f), "DUMP");
         DrawDumpControls();
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
-
-        // ---- live class inspector ----
-        ImGui::TextColored(ImVec4(0.40f, 0.85f, 1.0f, 1.0f), "LIVE CLASS & OFFSET INSPECTOR:");
-
-        static char s_query[64] = "Player";
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-        ImGui::InputTextWithHint("##Query", "class name (Player, Weapon, Camera)...",
-                                 s_query, sizeof(s_query));
-
-        static const void* s_klass = nullptr;
-        static char s_klassName[128] = "";
-        static char s_klassNs[128] = "";
-
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 0.8f), "Presets:");
-        static const char* kPresets[] = { "Player", "Weapon", "Camera", "GameFacade" };
-        for (int i = 0; i < 4; ++i) {
-            if (i > 0) ImGui::SameLine();
-            if (ImGui::SmallButton(kPresets[i])) {
-                strncpy(s_query, kPresets[i], sizeof(s_query) - 1);
-                s_query[sizeof(s_query) - 1] = '\0';
-                s_klass = nullptr;
-            }
-        }
-
-        if (s_query[0] != '\0') {
-            auto results = RealDumper::SearchClassesLive(s_query, 15);
-            if (results.empty()) {
-                ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 0.8f),
-                                   "No classes matched '%s'", s_query);
-            } else {
-                ImGui::BeginChild("##Results", ImVec2(-1, 100.0f), true,
-                                  ImGuiWindowFlags_HorizontalScrollbar);
-                for (size_t i = 0; i < results.size(); ++i) {
-                    const auto& r = results[i];
-                    char label[320];
-                    snprintf(label, sizeof(label), "%s%s%s (%s)",
-                             r.namespaze, r.namespaze[0] ? "." : "",
-                             r.name, r.imageName);
-
-                    if (ImGui::Selectable(label, s_klass == r.klass)) {
-                        s_klass = r.klass;
-                        snprintf(s_klassName, sizeof(s_klassName), "%s", r.name);
-                        snprintf(s_klassNs, sizeof(s_klassNs), "%s", r.namespaze);
-                    }
-                }
-                ImGui::EndChild();
-            }
-        }
-
-        if (s_klass) {
-            ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.6f, 1.0f), "INSPECTING: %s%s%s",
-                               s_klassNs, s_klassNs[0] ? "." : "", s_klassName);
-
-            if (ImGui::CollapsingHeader("FIELDS", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::BeginChild("##Fields", ImVec2(-1, 140.0f), true);
-                void* iter = nullptr;
-                int count = 0;
-                while (void* field = Il2CppClassGetFields(s_klass, &iter)) {
-                    const char* fname = Il2CppFieldGetName(field);
-                    if (!fname || fname[0] == '\0') continue;
-
-                    const void* ftype = Il2CppFieldGetType(field);
-                    const char* tname = ftype ? Il2CppTypeGetName(ftype) : "var";
-
-                    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.35f, 1.0f),
-                                       "+0x%zx", Il2CppFieldGetOffset(field));
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "[%s]", tname);
-                    ImGui::SameLine();
-                    ImGui::Text("%s", fname);
-                    ++count;
-                }
-                if (count == 0) {
-                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 0.8f), "(no instance fields)");
-                }
-                ImGui::EndChild();
-            }
-
-            if (ImGui::CollapsingHeader("METHODS", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::BeginChild("##Methods", ImVec2(-1, 140.0f), true);
-                void* iter = nullptr;
-                int count = 0;
-                while (void* method = Il2CppClassGetMethods(s_klass, &iter)) {
-                    const char* mname = Il2CppMethodGetName(method);
-                    if (!mname || mname[0] == '\0') continue;
-
-                    void* code = *(void**)method;
-                    ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f),
-                                       "RVA: 0x%lx", (unsigned long)RealDumper::GetRva(code));
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 0.8f),
-                                       "VA: 0x%lx", (unsigned long)code);
-                    ImGui::SameLine();
-                    ImGui::Text("%s(%u args)", mname, Il2CppMethodGetParamCount(method));
-                    ++count;
-                }
-                if (count == 0) {
-                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 0.8f), "(no methods found)");
-                }
-                ImGui::EndChild();
-            }
-        }
+        ImGui::TextColored(ImVec4(0.40f, 0.85f, 1.00f, 1.00f), "INSPECT");
+        DrawInspector();
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -347,14 +405,13 @@ inline void RenderMainModMenu(bool& menuOpen, int& currentTab) {
 
         ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.20f, 0.25f, 0.35f, 0.85f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.38f, 0.52f, 0.95f));
-        if (ImGui::Button("HIDE MENU", ImVec2(-1, 38.0f))) menuOpen = false;
+        if (ImGui::Button("HIDE", ImVec2(-1, 36.0f))) menuOpen = false;
         ImGui::PopStyleColor(2);
 
-        DrawMenuChrome(dl, winPos, winSize, closeBtnPos, overClose, headerH);
+        DrawHeaderBar(drawList, windowPos, windowSize, closePos, overClose, kHeaderHeight);
         ImGui::PopItemWidth();
     }
     ImGui::End();
 
-    ImGui::PopStyleColor(19);
-    ImGui::PopStyleVar(7);
+    MenuTheme::Pop();
 }

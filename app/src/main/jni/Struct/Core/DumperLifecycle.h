@@ -1,4 +1,9 @@
-// Zygisk injection lifecycle: waits for the Il2Cpp runtime, then unlocks live inspection.
+// DumperLifecycle.h - waits for the runtime, then unlocks the overlay.
+//
+// The library can be loaded before libil2cpp.so is even mapped (a constructor
+// runs early). Everything here is a bounded poll: it gives up cleanly and says
+// so in the log instead of spinning forever or assuming success.
+
 #pragma once
 
 #include <atomic>
@@ -7,47 +12,46 @@
 
 #include "../../Unity/Il2Cpp.h"
 #include "../../Protection/CrashLogger.h"
-#include "../../Core/MemoryUtils.h"
-
-extern uintptr_t il2cpp_base;
+#include "../../Core/SafeMemory.h"
+#include "../../Core/MetadataParser.h"
 
 inline int g_GlWidth = 0;
 inline int g_GlHeight = 0;
 inline std::atomic<bool> g_Il2CppReady{false};
 inline std::atomic<bool> g_EglHooked{false};
-inline std::atomic<bool> g_AssemblyLoaded{false};
 inline std::atomic<bool> g_UserInteracted{false};
 
 inline void EnsureIl2CppReady() {
     static std::once_flag s_once;
     std::call_once(s_once, []() {
-        Logger::Log("attaching to live Il2Cpp runtime");
+        Logger::Log("attaching to the il2cpp runtime");
 
-        uintptr_t base = 0;
-        for (int i = 0; i < 60 && base == 0; ++i) {
-            base = GetModuleBase("libil2cpp.so");
-            if (!base) usleep(50000);
+        // Attach resolves the module base itself, so a single call is enough;
+        // repeat it while the loader has not mapped the module yet.
+        bool ready = false;
+        for (int attempt = 0; attempt < 120 && !ready; ++attempt) {
+            Il2CppAttach();
+            MetadataParser::Located loc;
+            ready = Il2CppIsReady() || MetadataParser::Locate(loc);
+            if (!ready) usleep(100 * 1000);
         }
-        if (!base) {
-            Logger::Log("libil2cpp.so never mapped, aborting attach");
+
+        if (!ready) {
+            Logger::Log("il2cpp never became ready; dump and inspect stay disabled");
             return;
         }
-        il2cpp_base = base;
-        Logger::Log("libil2cpp.so at 0x%lx", (unsigned long)base);
 
-        const void* assembly = nullptr;
-        for (int i = 0; i < 60 && !assembly; ++i) {
-            Il2CppAttach();
-            assembly = Il2CppGetImageByName("Assembly-CSharp.dll");
-            if (!assembly) usleep(50000);
-        }
+        SafeMemory::Refresh();
 
-        if (assembly) {
-            g_AssemblyLoaded.store(true);
-            g_Il2CppReady.store(true);
-            Logger::Log("Assembly-CSharp.dll ready, live inspection unlocked");
-        } else {
-            Logger::Log("Assembly-CSharp.dll never resolved, inspect disabled");
+        g_Il2CppReady.store(true);
+        Logger::Log("il2cpp ready: base 0x%lx, assemblies %zu, enumeration %s",
+                    (unsigned long)Il2CppGetBase(),
+                    Il2CppGetAssemblyCount(),
+                    Il2CppEnumerationMode());
+
+        const char* missing = Il2CppMissingApis();
+        if (missing && missing[0]) {
+            Logger::Log("exports not present on this build:\n%s", missing);
         }
     });
 }

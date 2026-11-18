@@ -29,25 +29,22 @@ inline bool BasenameEquals(const char* path, const char* moduleName) {
 
 } // namespace memutils
 
-// Lowest mapping address of the named module, or 0 when it is not mapped.
-inline uintptr_t GetModuleBase(const char* moduleName) {
-    if (!moduleName || moduleName[0] == '\0') return 0;
+// Mapped range (lowest address and total mapped size) of the named module.
+inline bool GetModuleRange(const char* moduleName, uintptr_t* outBase, size_t* outSize) {
+    if (!moduleName || moduleName[0] == '\0') return false;
 
     FILE* fp = fopen("/proc/self/maps", "r");
-    if (!fp) return 0;
+    if (!fp) return false;
 
     char line[1024];
     uintptr_t lowest = 0;
+    uintptr_t highest = 0;
 
     while (fgets(line, sizeof(line), fp)) {
-        uintptr_t start = 0;
+        uintptr_t start = 0, end = 0;
         char perms[5] = {0};
-        // address perms offset dev inode pathname
-        if (sscanf(line, "%lx-%*lx %4s %*s %*s %*s", &start, perms) < 2) continue;
+        if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) < 3) continue;
 
-        // Pathname is everything after the inode field; locate it by skipping
-        // the first five whitespace-separated tokens instead of relying on %s
-        // into a fixed buffer, since paths can carry spaces.
         const char* p = line;
         int fields = 0;
         while (*p && fields < 5) {
@@ -56,15 +53,32 @@ inline uintptr_t GetModuleBase(const char* moduleName) {
             ++fields;
         }
         while (*p == ' ' || *p == '\t') ++p;
-        if (!*p || *p == '\n') continue; // anonymous mapping, no file backing
+        if (!*p || *p == '\n') continue;
 
         if (!memutils::BasenameEquals(p, moduleName)) continue;
 
         if (lowest == 0 || start < lowest) lowest = start;
+        if (end > highest) highest = end;
     }
 
     fclose(fp);
-    return lowest;
+
+    if (lowest != 0 && highest > lowest) {
+        if (outBase) *outBase = lowest;
+        if (outSize) *outSize = highest - lowest;
+        return true;
+    }
+    return false;
+}
+
+// Lowest mapping address of the named module, or 0 when it is not mapped.
+inline uintptr_t GetModuleBase(const char* moduleName) {
+    uintptr_t base = 0;
+    size_t sz = 0;
+    if (GetModuleRange(moduleName, &base, &sz)) {
+        return base;
+    }
+    return 0;
 }
 
 // Same resolver, keyed on a pid. This library only ever inspects itself, so any

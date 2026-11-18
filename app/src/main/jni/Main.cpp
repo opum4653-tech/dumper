@@ -1,6 +1,10 @@
 // Main.cpp - NINMODS in-memory Il2Cpp dumper.
-// Target: Android (arm64-v8a / armeabi-v7a), NDK r21e, C++17.
-// Entry points: JNI_OnLoad (System.loadLibrary) and a DT_NEEDED constructor.
+//
+// Target: Android arm64-v8a / armeabi-v7a, NDK r21e, C++17.
+//
+// The overlay renders inside the game's own EGL context by hooking
+// eglSwapBuffers. Touch input is read through UnityEngine.Input rather than by
+// hooking the input pipeline, so nothing in the game's input path is modified.
 
 #include <android/log.h>
 #include <unistd.h>
@@ -21,24 +25,24 @@
 #include "Core/MemoryUtils.h"
 #include "Protection/CrashLogger.h"
 #include "Struct/Core/DumperLifecycle.h"
+#include "Struct/Dumper/Il2CppDumper.h"
 #include "Struct/Menu/MenuRender.h"
 #include "UI/FloatingIconUI.h"
 
-static int currentTab = 0;
-uintptr_t il2cpp_base = 0;
-inline bool menuOpen = false;
-inline bool iconVisible = true;
-std::mutex g_RenderMutex;
+static int g_currentTab = 0;
+static bool g_menuOpen = false;
+static bool g_iconVisible = true;
+static bool g_imGuiReady = false;
 
-static bool g_IsSetup = false;
+static std::mutex g_renderMutex;
 
 // ---------------------------------------------------------------------------
-// UnityEngine.Input bridge - resolved through il2cpp, no hook collisions.
-// Layout matches UnityEngine.Touch as returned by Input.GetTouch(int).
+// UnityEngine.Input bridge. Layout matches UnityEngine.Touch as returned by
+// Input.GetTouch(int); only the fields the overlay reads are declared.
 // ---------------------------------------------------------------------------
 struct UnityTouch {
     int32_t m_FingerId;
-    float   m_Position_x;   // Vector2
+    float   m_Position_x;
     float   m_Position_y;
     float   m_RawPosition_x;
     float   m_RawPosition_y;
@@ -47,8 +51,8 @@ struct UnityTouch {
     float   m_TimeDelta;
     int32_t m_TapCount;
     int32_t m_Phase;
-    int32_t m_Pressure;
-    int32_t m_MaximumPossiblePressure;
+    float   m_Pressure;
+    float   m_MaximumPossiblePressure;
     int32_t m_Type;
     float   m_AltitudeAngle;
     float   m_AzimuthAngle;
@@ -56,7 +60,49 @@ struct UnityTouch {
     float   m_RadiusVariance;
 };
 
-static void InitImGui(EGLDisplay dpy, EGLSurface surface) {
+namespace {
+
+struct TouchBridge {
+    void* touchCount = nullptr;
+    void* getTouch   = nullptr;
+    bool  resolved   = false;
+};
+
+TouchBridge& Touch() {
+    static TouchBridge s_bridge;
+    return s_bridge;
+}
+
+bool ResolveTouchBridge() {
+    TouchBridge& bridge = Touch();
+    if (bridge.resolved) return bridge.touchCount && bridge.getTouch;
+
+    static const char* kImages[] = {
+        "UnityEngine.InputLegacyModule.dll",
+        "UnityEngine.CoreModule.dll",
+        "UnityEngine.dll",
+    };
+
+    for (const char* image : kImages) {
+        if (!bridge.touchCount) {
+            bridge.touchCount = Il2CppGetMethodOffset(image, "UnityEngine", "Input", "get_touchCount", 0);
+        }
+        if (!bridge.getTouch) {
+            bridge.getTouch = Il2CppGetMethodOffset(image, "UnityEngine", "Input", "GetTouch", 1);
+        }
+        if (bridge.touchCount && bridge.getTouch) break;
+    }
+
+    bridge.resolved = true;
+    if (bridge.touchCount && bridge.getTouch) {
+        Logger::Log("touch bridge resolved through il2cpp");
+    } else {
+        Logger::Log("touch bridge unavailable; overlay stays visible but not interactive");
+    }
+    return bridge.touchCount && bridge.getTouch;
+}
+
+void InitImGui() {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -66,165 +112,154 @@ static void InitImGui(EGLDisplay dpy, EGLSurface surface) {
     ImGui_ImplOpenGL3_Init("#version 300 es");
     ImGui_ImplAndroid_Init(nullptr);
 
-    Logger::Log("ImGui context ready (%dx%d)", g_GlWidth, g_GlHeight);
-    (void)dpy;
-    (void)surface;
+    Logger::Log("imgui ready (%dx%d)", g_GlWidth, g_GlHeight);
 }
 
-static void ShutdownImGui() {
+void ShutdownImGui() {
     if (ImGui::GetCurrentContext() == nullptr) return;
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplAndroid_Shutdown();
     ImGui::DestroyContext();
+    g_imGuiReady = false;
 }
 
-static void RenderFrame() {
-    if (!menuOpen) {
-        RenderFloatingIconUI(menuOpen, iconVisible);
-        return;
+void PumpTouch(ImGuiIO& io) {
+    if (!Touch().resolved) {
+        static int s_frameCounter = 0;
+        if (++s_frameCounter < 30) return;
+        static bool s_attempted = false;
+        if (s_attempted && !g_Il2CppReady.load()) return;
+        s_attempted = true;
+        if (!ResolveTouchBridge()) return;
     }
-    iconVisible = true;
-    RenderMainModMenu(menuOpen, currentTab);
-}
-
-static EGLBoolean (*old_eglSwapBuffers)(EGLDisplay, EGLSurface) = nullptr;
-
-static EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
-    if (!old_eglSwapBuffers) return EGL_TRUE;
-    if (dpy == EGL_NO_DISPLAY || surface == EGL_NO_SURFACE) return old_eglSwapBuffers(dpy, surface);
-
-    EGLContext ctx = eglGetCurrentContext();
-    if (ctx == EGL_NO_CONTEXT) return old_eglSwapBuffers(dpy, surface);
-
-    EGLint w = 0, h = 0;
-    eglQuerySurface(dpy, surface, EGL_WIDTH, &w);
-    eglQuerySurface(dpy, surface, EGL_HEIGHT, &h);
-    if (w <= 0 || h <= 0) return old_eglSwapBuffers(dpy, surface);
-    g_GlWidth = w;
-    g_GlHeight = h;
-
-    std::lock_guard<std::mutex> lock(g_RenderMutex);
-
-    static EGLContext s_lastContext = EGL_NO_CONTEXT;
-    if (s_lastContext != ctx) {
-        ShutdownImGui();
-        s_lastContext = ctx;
-        g_IsSetup = false;
-        g_NinLogoTexture = 0;   // texture belongs to the old context
-    }
-
-    if (!g_IsSetup) {
-        InitImGui(dpy, surface);
-        g_IsSetup = true;
-    }
-
-    ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2((float)w, (float)h);
-    ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplAndroid_NewFrame(w, h);
-    ImGui::NewFrame();
-
-    // Touch: resolve Input.get_touchCount / Input.GetTouch once libil2cpp is up.
-    static bool s_resolved = false;
-    static int s_frameDelay = 0;
-    static void* s_touchCount = nullptr;
-    static void* s_getTouch = nullptr;
-
-    if (!s_resolved && ++s_frameDelay > 30) {
-        if (!il2cpp_base) il2cpp_base = GetModuleBase("libil2cpp.so");
-        if (il2cpp_base) {
-            static const char* kImages[] = {
-                "UnityEngine.dll",
-                "UnityEngine.InputLegacyModule.dll",
-                "UnityEngine.CoreModule.dll"
-            };
-            for (const char* img : kImages) {
-                if (!s_touchCount) {
-                    s_touchCount = Il2CppGetMethodOffset(img, "UnityEngine", "Input", "get_touchCount", 0);
-                }
-                if (!s_getTouch) {
-                    s_getTouch = Il2CppGetMethodOffset(img, "UnityEngine", "Input", "GetTouch", 1);
-                }
-                if (s_touchCount && s_getTouch) break;
-            }
-            if (s_touchCount && s_getTouch) {
-                s_resolved = true;
-                g_Il2CppReady.store(true);
-                Logger::Log("Touch bridge resolved via il2cpp (no hook collision)");
-            }
-        }
-    }
+    if (!Touch().touchCount || !Touch().getTouch) return;
 
     static bool s_touching = false;
     static float s_touchStart = 0.0f;
 
-    if (s_resolved) {
-        int count = ((int (*)())(s_touchCount))();
-        if (count > 0 && count <= 10) {
-            UnityTouch t = ((UnityTouch(*)(int))(s_getTouch))(0);
-            io.MousePos = ImVec2(t.m_Position_x, io.DisplaySize.y - t.m_Position_y);
-            if (!s_touching) s_touchStart = ImGui::GetTime();
-            io.MouseDown[0] = true;
-            s_touching = true;
-        } else if (s_touching && (ImGui::GetTime() - s_touchStart) < 0.06f) {
-            io.MouseDown[0] = true;          // debounce the release frame
-        } else {
-            io.MouseDown[0] = false;
-            s_touching = false;
-        }
+    const int count = ((int (*)())Touch().touchCount)();
+    if (count > 0 && count <= 10) {
+        const UnityTouch touch = ((UnityTouch (*)(int))Touch().getTouch)(0);
+        io.MousePos = ImVec2(touch.m_Position_x, io.DisplaySize.y - touch.m_Position_y);
+        if (!s_touching) s_touchStart = ImGui::GetTime();
+        io.MouseDown[0] = true;
+        s_touching = true;
+        return;
     }
+
+    // A one-frame release debounce keeps a tap from being read as a click plus
+    // a drag release.
+    if (s_touching && (ImGui::GetTime() - s_touchStart) < 0.06f) {
+        io.MouseDown[0] = true;
+        return;
+    }
+    io.MouseDown[0] = false;
+    s_touching = false;
+}
+
+void RenderFrame() {
+    if (!g_menuOpen) {
+        RenderFloatingIconUI(g_menuOpen, g_iconVisible);
+        return;
+    }
+    g_iconVisible = true;
+    RenderMainModMenu(g_menuOpen, g_currentTab);
+}
+
+EGLBoolean (*g_originalSwapBuffers)(EGLDisplay, EGLSurface) = nullptr;
+
+EGLBoolean HookedSwapBuffers(EGLDisplay display, EGLSurface surface) {
+    if (!g_originalSwapBuffers) return EGL_TRUE;
+    if (display == EGL_NO_DISPLAY || surface == EGL_NO_SURFACE) {
+        return g_originalSwapBuffers(display, surface);
+    }
+
+    EGLContext context = eglGetCurrentContext();
+    if (context == EGL_NO_CONTEXT) return g_originalSwapBuffers(display, surface);
+
+    EGLint width = 0, height = 0;
+    eglQuerySurface(display, surface, EGL_WIDTH, &width);
+    eglQuerySurface(display, surface, EGL_HEIGHT, &height);
+    if (width <= 0 || height <= 0) return g_originalSwapBuffers(display, surface);
+
+    g_GlWidth = width;
+    g_GlHeight = height;
+
+    std::lock_guard<std::mutex> lock(g_renderMutex);
+
+    // A context switch invalidates every GL object, so the ImGui backend and the
+    // logo texture are rebuilt for the new context.
+    static EGLContext s_lastContext = EGL_NO_CONTEXT;
+    if (s_lastContext != context) {
+        ShutdownImGui();
+        s_lastContext = context;
+        g_NinLogoTexture = 0;
+    }
+
+    if (!g_imGuiReady) {
+        InitImGui();
+        g_imGuiReady = true;
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)width, (float)height);
+
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplAndroid_NewFrame(width, height);
+    ImGui::NewFrame();
+
+    PumpTouch(io);
 
     RenderFrame();
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-    return old_eglSwapBuffers(dpy, surface);
+    return g_originalSwapBuffers(display, surface);
 }
 
-static bool InstallEglHook() {
-    void* p = dlsym(RTLD_DEFAULT, "eglSwapBuffers");
-    if (!p) p = DobbySymbolResolver("/system/lib64/libEGL.so", "eglSwapBuffers");
-    if (!p) p = DobbySymbolResolver("/system/lib/libEGL.so", "eglSwapBuffers");
-    if (!p) return false;
+bool InstallSwapBuffersHook() {
+    void* target = dlsym(RTLD_DEFAULT, "eglSwapBuffers");
+    if (!target) target = DobbySymbolResolver("/system/lib64/libEGL.so", "eglSwapBuffers");
+    if (!target) target = DobbySymbolResolver("/system/lib/libEGL.so", "eglSwapBuffers");
+    if (!target) return false;
 
-    if (DobbyHook(p, (void*)hook_eglSwapBuffers, (void**)&old_eglSwapBuffers) != 0) return false;
+    if (DobbyHook(target, (void*)HookedSwapBuffers, (void**)&g_originalSwapBuffers) != 0) return false;
 
-    Logger::Log("eglSwapBuffers hooked at %p", p);
+    Logger::Log("eglSwapBuffers hooked at %p", target);
     return true;
 }
 
-static void ModWatcher() {
-    Logger::Log("watcher: waiting for EGL surface and libil2cpp.so");
+void Watcher() {
+    Logger::Log("watcher started");
 
-    for (int i = 0; i < 120; ++i) {
-        if (!g_EglHooked.load() && InstallEglHook()) {
+    for (int tick = 0; tick < 180; ++tick) {
+        if (!g_EglHooked.load() && InstallSwapBuffersHook()) {
             g_EglHooked.store(true);
-            Logger::Log("watcher: eglSwapBuffers hooked");
         }
 
-        if (!il2cpp_base) {
-            il2cpp_base = GetModuleBase("libil2cpp.so");
-            if (il2cpp_base) {
-                Logger::Log("watcher: libil2cpp.so at 0x%lx", (unsigned long)il2cpp_base);
-            }
+        if (!g_Il2CppReady.load()) {
+            EnsureIl2CppReady();
         }
 
-        if (g_EglHooked.load() && il2cpp_base) {
-            Logger::Log("watcher: both ready, polling finished");
+        if (g_EglHooked.load() && g_Il2CppReady.load()) {
+            Logger::Log("watcher: render hook and runtime both ready");
             return;
         }
         sleep(1);
     }
-    Logger::Log("watcher: timed out after 120s");
+    Logger::Log("watcher: gave up after 180s (egl=%d il2cpp=%d)",
+                (int)g_EglHooked.load(), (int)g_Il2CppReady.load());
 }
 
+} // namespace
+
 __attribute__((constructor)) static void NinModsConstructor() {
-    static std::atomic<bool> s_init{false};
-    if (s_init.exchange(true)) return;
+    static std::atomic<bool> s_started{false};
+    if (s_started.exchange(true)) return;
 
     Logger::InstallCrashHandler();
-    Logger::Log("NINMODS loaded inside game process, starting watcher");
-    std::thread(ModWatcher).detach();
+    Logger::Log("NINMODS loaded, pid %d", (int)getpid());
+    std::thread(Watcher).detach();
 }
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
