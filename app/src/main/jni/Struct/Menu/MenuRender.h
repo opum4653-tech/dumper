@@ -18,7 +18,6 @@
 #include "../../Icon/TextureLoader.h"
 #include "../Core/DumperLifecycle.h"
 #include "../Dumper/Il2CppDumper.h"
-#include "../Config/ModConfig.h"
 
 namespace MenuTheme {
 
@@ -124,66 +123,6 @@ inline void SearchClasses(const char* query, size_t limit, std::vector<ClassHit>
             out.push_back(hit);
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// ESP & Combat Controls
-// ---------------------------------------------------------------------------
-inline void DrawEspControls() {
-    ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.00f, 1.00f), "ESP VISUALS");
-    ImGui::Separator();
-    ImGui::Checkbox("ESP Box (Chaturbhuj)", &cfg::esp::box);
-    const char* boxTypes[] = { "Corner Box", "Full Box", "Glow Box" };
-    ImGui::Combo("Box Style", &cfg::esp::box_type, boxTypes, 3);
-    ImGui::Checkbox("ESP Health Bar", &cfg::esp::health);
-    ImGui::Checkbox("ESP Armor Bar", &cfg::esp::armor);
-    ImGui::Checkbox("ESP Laser Line (Tracer)", &cfg::esp::tracer);
-    ImGui::Checkbox("ESP Player Name", &cfg::esp::name);
-    ImGui::Checkbox("ESP Distance", &cfg::esp::distance);
-    ImGui::Checkbox("ESP Weapon Name", &cfg::esp::weapon);
-    ImGui::Checkbox("ESP Bot Tag (AI)", &cfg::esp::bot_tag);
-    ImGui::Checkbox("Crosshair Center", &cfg::esp::crosshair);
-    ImGui::Checkbox("Firing Indicator", &cfg::esp::firing_ind);
-    ImGui::Checkbox("Loot ESP", &cfg::esp::loot);
-
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.90f, 0.75f, 0.35f, 1.00f), "RANGES & THICKNESS");
-    ImGui::SliderFloat("Max Range", &cfg::esp::max_range, 30.0f, 500.0f, "%.0f m");
-    ImGui::SliderFloat("Box Thickness", &cfg::esp::box_thickness, 1.0f, 6.0f, "%.1f px");
-    ImGui::SliderFloat("Laser Thickness", &cfg::esp::tracer_thickness, 0.5f, 5.0f, "%.1f px");
-}
-
-inline void DrawAimControls() {
-    ImGui::TextColored(ImVec4(1.00f, 0.35f, 0.75f, 1.00f), "COMBAT & AIMBOT SETTINGS");
-    ImGui::Separator();
-    ImGui::Checkbox("Enable Aim Assist", &cfg::aim::enable);
-    ImGui::Checkbox("Scope Aim (Instant Head)", &cfg::aim::scope_aim);
-    ImGui::Checkbox("Sniper Headshot Lock (AWM/M82B)", &cfg::aim::sniper_aim);
-
-    ImGui::Spacing();
-    const char* boneTargets[] = { "Head (Auto Drag)", "Neck / Upper Chest", "Pelvis / Body (mBody)" };
-    ImGui::Combo("Target Aim Bone", &cfg::aim::target_bone, boneTargets, 3);
-
-    ImGui::SliderFloat("Headshot Rate %", &cfg::aim::headshot_rate, 0.0f, 100.0f, "%.0f%%");
-
-    const char* triggerModes[] = { "When Firing", "Always In FOV" };
-    ImGui::Combo("Aim Trigger Condition", &cfg::aim::trigger_mode, triggerModes, 2);
-
-    const char* priorityModes[] = { "Crosshair Distance", "Lowest Health", "3D Distance" };
-    ImGui::Combo("Target Selection Priority", &cfg::aim::priority_mode, priorityModes, 3);
-
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.00f, 1.00f), "FOV & SMOOTHNESS");
-    ImGui::Checkbox("Draw FOV Circle", &cfg::aim::show_fov);
-    ImGui::SliderFloat("FOV Radius", &cfg::aim::fov_radius, 30.0f, 600.0f, "%.0f px");
-    ImGui::SliderFloat("Smooth Factor", &cfg::aim::smooth, 1.0f, 30.0f, "%.1f");
-    ImGui::SliderFloat("Max Aim Range", &cfg::aim::max_distance, 20.0f, 400.0f, "%.0f m");
-
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.35f, 1.00f), "SAFETY FILTERS");
-    ImGui::Checkbox("Ignore Knocked Enemies", &cfg::aim::ignore_knocked);
-    ImGui::Checkbox("Ignore AI Bot Players", &cfg::aim::ignore_bots);
-    ImGui::Checkbox("Check Visibility Only", &cfg::aim::visible_check);
 }
 
 // ---------------------------------------------------------------------------
@@ -354,9 +293,7 @@ inline void DrawHeaderBar(ImDrawList* drawList, ImVec2 windowPos, ImVec2 windowS
                       IM_COL32(255, 255, 255, 240), 2.0f);
 }
 
-inline void RenderMainModMenu(bool& menuOpen, int& currentTab) {
-    (void)currentTab;
-
+inline void RenderMainModMenu(bool& menuOpen) {
     const float screenWidth = (ImGui::GetIO().DisplaySize.x > 0.0f)
         ? ImGui::GetIO().DisplaySize.x : (float)g_GlWidth;
     const float screenHeight = (ImGui::GetIO().DisplaySize.y > 0.0f)
@@ -440,64 +377,29 @@ inline void RenderMainModMenu(bool& menuOpen, int& currentTab) {
 
         ImGui::SetCursorPosY(kHeaderHeight + 6.0f);
 
-        // Tab Navigation Bar
-        const float tabWidth = (windowSize.x - 28.0f) / 3.0f;
-        auto TabBtn = [&](const char* name, int tabIndex) {
-            bool active = (currentTab == tabIndex);
-            if (active) {
-                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.25f, 0.50f, 0.85f, 0.90f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.60f, 0.95f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.10f, 0.15f, 0.22f, 0.80f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.26f, 0.38f, 0.90f));
-                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.70f, 0.75f, 0.85f, 0.90f));
-            }
-            if (ImGui::Button(name, ImVec2(tabWidth, 34.0f))) {
-                currentTab = tabIndex;
-            }
-            ImGui::PopStyleColor(3);
-        };
+        static const std::string s_package = Dumper::TargetPackage();
+        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.00f, 1.00f), "IL2CPP LIVE DUMPER");
+        ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.95f, 0.90f), "%s  (pid %d)",
+                           s_package.c_str(), (int)getpid());
+        if (Il2CppIsReady()) {
+            ImGui::TextColored(ImVec4(0.75f, 0.80f, 0.85f, 0.90f),
+                               "base 0x%lx   assemblies %zu",
+                               (unsigned long)Il2CppGetBase(),
+                               Il2CppGetAssemblyCount());
+        } else {
+            ImGui::TextColored(ImVec4(0.95f, 0.60f, 0.30f, 1.00f), "IL2CPP runtime initializing...");
+        }
+        ImGui::Separator();
 
-        TabBtn("ESP", 0);
-        ImGui::SameLine();
-        TabBtn("AIMBOT", 1);
-        ImGui::SameLine();
-        TabBtn("DUMPER", 2);
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.30f, 1.00f), "DUMP ENGINE");
+        DrawDumpControls();
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
-
-        if (currentTab == 0) {
-            DrawEspControls();
-        } else if (currentTab == 1) {
-            DrawAimControls();
-        } else if (currentTab == 2) {
-            static const std::string s_package = Dumper::TargetPackage();
-            ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.00f, 1.00f), "IL2CPP LIVE DUMPER");
-            ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.95f, 0.90f), "%s  (pid %d)",
-                               s_package.c_str(), (int)getpid());
-            if (Il2CppIsReady()) {
-                ImGui::TextColored(ImVec4(0.75f, 0.80f, 0.85f, 0.90f),
-                                   "base 0x%lx   assemblies %zu",
-                                   (unsigned long)Il2CppGetBase(),
-                                   Il2CppGetAssemblyCount());
-            } else {
-                ImGui::TextColored(ImVec4(0.95f, 0.60f, 0.30f, 1.00f), "IL2CPP runtime initializing...");
-            }
-            ImGui::Separator();
-
-            ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.30f, 1.00f), "DUMP");
-            DrawDumpControls();
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.40f, 0.85f, 1.00f, 1.00f), "INSPECT");
-            DrawInspector();
-        }
+        ImGui::TextColored(ImVec4(0.40f, 0.85f, 1.00f, 1.00f), "LIVE INSPECTOR");
+        DrawInspector();
 
         ImGui::Spacing();
         ImGui::Separator();

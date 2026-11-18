@@ -29,8 +29,7 @@
 #include "Struct/Menu/MenuRender.h"
 #include "UI/FloatingIconUI.h"
 
-static int g_currentTab = 0;
-static bool g_menuOpen = false;
+static bool g_menuOpen = true;
 static bool g_iconVisible = true;
 static bool g_imGuiReady = false;
 
@@ -180,7 +179,7 @@ void RenderFrame() {
         return;
     }
     g_iconVisible = true;
-    RenderMainModMenu(g_menuOpen, g_currentTab);
+    RenderMainModMenu(g_menuOpen);
 }
 
 EGLBoolean (*g_originalSwapBuffers)(EGLDisplay, EGLSurface) = nullptr;
