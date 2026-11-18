@@ -158,9 +158,3 @@ jobs:
             - **Direct Storage Dump**: Automatically writes `dump.cs`, `script.json`, `stringliteral.json`, `il2cpp.h`, and `global-metadata.dat` to `/storage/emulated/0/Download/NINMODS_DUMP/`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            - **Native Injected Library**: `libNINMODS.so` (arm64-v8a & armeabi-v7a)
-            - **Smali / Dex Injection**: Compatible with `System.loadLibrary("NINMODS")`
-            - **Universal Support**: Works across all Unity Il2Cpp games & versions
-            - **Direct Storage Dump**: Automatically writes `dump.cs`, `script.json`, `stringliteral.json`, `il2cpp.h`, and `global-metadata.dat` to `/storage/emulated/0/Download/NINMODS_DUMP/`
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
