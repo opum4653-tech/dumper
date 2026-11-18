@@ -3,10 +3,7 @@
 
 #include "../imgui/imgui.h"
 #include "../Icon/TextureLoader.h"
-#include <atomic>
-
-extern int g_GlWidth, g_GlHeight;
-extern std::atomic<bool> g_UserInteracted;
+#include "../Struct/Core/DumperLifecycle.h"
 
 inline void RenderFloatingIconUI(bool &menuOpen, bool &iconVisible) {
     if (menuOpen || !iconVisible) return;

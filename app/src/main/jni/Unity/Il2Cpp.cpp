@@ -605,19 +605,31 @@ void* Il2CppClassGetFields(const void* klass, void** iter) {
 }
 
 const char* Il2CppFieldGetName(const void* field) {
-    if (!field || !il2cpp_field_get_name) return "";
-    const char* name = il2cpp_field_get_name((void*)field);
+    if (!field) return "";
+    if (il2cpp_field_get_name) {
+        const char* name = il2cpp_field_get_name((void*)field);
+        return name ? name : "";
+    }
+    const char* name = *(const char* const*)field;
     return name ? name : "";
 }
 
 size_t Il2CppFieldGetOffset(const void* field) {
-    if (!field || !il2cpp_field_get_offset) return 0;
-    return il2cpp_field_get_offset((void*)field);
+    if (!field) return 0;
+    if (il2cpp_field_get_offset) {
+        return il2cpp_field_get_offset((void*)field);
+    }
+    // Direct struct layout fallback (Unity FieldInfo: name, type, parent, offset)
+    int32_t off = *(const int32_t*)((const uint8_t*)field + 3 * sizeof(void*));
+    return off >= 0 ? (size_t)off : 0;
 }
 
 const void* Il2CppFieldGetType(const void* field) {
-    if (!field || !il2cpp_field_get_type) return nullptr;
-    return il2cpp_field_get_type((void*)field);
+    if (!field) return nullptr;
+    if (il2cpp_field_get_type) {
+        return il2cpp_field_get_type((void*)field);
+    }
+    return *(const void* const*)((const uint8_t*)field + sizeof(void*));
 }
 
 int Il2CppFieldGetFlags(const void* field) {

@@ -206,6 +206,7 @@ struct FieldSnapshot {
     std::string name;
     std::string typeName;
     size_t      offset = 0;
+    bool        hasRealOffset = false;
     size_t      size   = 0;
     uint32_t    flags  = 0;
     bool        isStatic = false;
@@ -333,6 +334,7 @@ inline bool CollectClass(const void* klass, const char* imageName, ClassSnapshot
         snapshot.flags = (uint32_t)Il2CppFieldGetFlags(field);
         snapshot.isStatic = (snapshot.flags & Il2CppFlags::kFieldStatic) != 0;
         snapshot.isLiteral = (snapshot.flags & Il2CppFlags::kFieldLiteral) != 0;
+        snapshot.hasRealOffset = (!snapshot.isStatic && !snapshot.isLiteral && snapshot.offset > 0);
 
         const void* fieldType = Il2CppFieldGetType(field);
         snapshot.typeName = CopyTypeName(fieldType);
@@ -410,7 +412,8 @@ inline bool CollectFromMetadata(Snapshot& out) {
                 FieldSnapshot field;
                 field.name = fName;
                 field.typeName = "var";
-                field.offset = f * sizeof(void*);
+                field.offset = 0;
+                field.hasRealOffset = false;
                 cls.fields.push_back(field);
             }
         }
@@ -510,7 +513,11 @@ inline void WriteCsClass(DumpWriter::File& file, const ClassSnapshot& cls) {
                 if (field.isStatic) file.Put("static ");
                 if (field.flags & Il2CppFlags::kFieldInitOnly) file.Put("readonly ");
             }
-            file.Printf("%s %s; // 0x%zx\n", field.typeName.c_str(), field.name.c_str(), field.offset);
+            if (field.hasRealOffset) {
+                file.Printf("%s %s; // 0x%zx\n", field.typeName.c_str(), field.name.c_str(), field.offset);
+            } else {
+                file.Printf("%s %s;\n", field.typeName.c_str(), field.name.c_str());
+            }
         }
         file.Put("\n");
     }
@@ -520,15 +527,15 @@ inline void WriteCsClass(DumpWriter::File& file, const ClassSnapshot& cls) {
         for (const MethodSnapshot& method : cls.methods) {
             uint32_t flags = method.flags;
             if (flags & Il2CppFlags::kMethodAbstract) {
-                file.Put("\t// RVA: 0x0 (ABSTRACT)\n");
-            } else if (method.hasRva) {
+                file.Put("\t// (ABSTRACT)\n");
+            } else if (method.hasRva && method.rva > 0) {
                 file.Printf("\t// RVA: 0x%llx VA: 0x%lx\n",
                             (unsigned long long)method.rva, (unsigned long)method.va);
             } else if (method.isExternal) {
                 file.Printf("\t// RVA: EXTERNAL (%s) VA: 0x%lx\n",
                             method.ownerModule.c_str(), (unsigned long)method.va);
             } else {
-                file.Put("\t// RVA: 0x0 (NO BODY)\n");
+                file.Put("\t// (NO BODY)\n");
             }
 
             file.Put("\t");
@@ -724,12 +731,14 @@ inline bool WriteOffsets(const std::string& path, const Snapshot& snapshot) {
             file.Printf("// %s\n", QualifiedName(cls.namespaze, cls.name).c_str());
 
             for (const FieldSnapshot& field : cls.fields) {
+                if (field.isStatic || field.isLiteral) continue;
+                if (!field.hasRealOffset || field.offset == 0) continue; // Real offsets only
                 const std::string fieldName = SanitizeIdentifier(field.name);
                 file.Printf("#define OFFSET_%s_%s 0x%zxULL\n", owner.c_str(), fieldName.c_str(), field.offset);
             }
 
             for (const MethodSnapshot& method : cls.methods) {
-                if (!method.hasRva) continue;
+                if (!method.hasRva || method.rva == 0) continue; // Real RVAs only
                 const std::string methodName = SanitizeIdentifier(method.name);
                 file.Printf("#define RVA_%s_%s 0x%llxULL // params: %u\n",
                             owner.c_str(), methodName.c_str(),
