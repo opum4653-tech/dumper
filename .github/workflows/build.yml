@@ -32,7 +32,7 @@ jobs:
           add-to-path: true
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Accept Licenses
         run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
