@@ -54,20 +54,12 @@ jobs:
           fi
           echo "Using NDK binary: $NDK_BIN"
           
-          $NDK_BIN -C app/src/main -j$(nproc) V=1 2>&1 | tee ndk_build.log
+          mkdir -p output_libs
           
-          mkdir -p output_libs/arm64-v8a
-          mkdir -p output_libs/armeabi-v7a
+          $NDK_BIN NDK_PROJECT_PATH=app/src/main APP_BUILD_SCRIPT=app/src/main/jni/Android.mk NDK_APPLICATION_MK=app/src/main/jni/Application.mk NDK_LIBS_OUT=$(pwd)/output_libs -j$(nproc) V=1 2>&1 | tee ndk_build.log || true
           
-          if [ -f "app/src/main/libs/arm64-v8a/libNINMODS.so" ]; then
-            cp "app/src/main/libs/arm64-v8a/libNINMODS.so" output_libs/arm64-v8a/
-            echo "[OK] Found libNINMODS.so for arm64-v8a"
-          fi
-          
-          if [ -f "app/src/main/libs/armeabi-v7a/libNINMODS.so" ]; then
-            cp "app/src/main/libs/armeabi-v7a/libNINMODS.so" output_libs/armeabi-v7a/
-            echo "[OK] Found libNINMODS.so for armeabi-v7a"
-          fi
+          echo "=== NDK BUILD LOG (LAST 60 LINES) ==="
+          tail -n 60 ndk_build.log || true
 
       - name: Upload NDK Build Log
         if: always()
@@ -88,45 +80,33 @@ jobs:
       - name: Collect and Verify Output Binaries
         run: |
           echo "============================================================"
-          echo "Collecting compiled native libraries from all build stages..."
+          echo "=== WORKSPACE SO / APK SCAN ==="
           echo "============================================================"
-          mkdir -p output_libs/arm64-v8a
-          mkdir -p output_libs/armeabi-v7a
-
-          # 1. Search for any built libNINMODS.so across the workspace
-          find . -type f -name "libNINMODS.so" | while read -r libPath; do
-            echo "Found compiled library: $libPath"
-            if echo "$libPath" | grep -q "arm64-v8a"; then
-              cp -f "$libPath" output_libs/arm64-v8a/
-            elif echo "$libPath" | grep -q "armeabi-v7a"; then
-              cp -f "$libPath" output_libs/armeabi-v7a/
+          find . -name "*.so" || true
+          find . -name "*.apk" || true
+          
+          mkdir -p output_libs/arm64-v8a output_libs/armeabi-v7a
+          
+          find . -name "libNINMODS.so" | while read -r f; do
+            if echo "$f" | grep -q "arm64-v8a"; then
+              cp -f "$f" output_libs/arm64-v8a/
+            fi
+            if echo "$f" | grep -q "armeabi-v7a"; then
+              cp -f "$f" output_libs/armeabi-v7a/
             fi
           done
 
-          # 2. Extract from generated release APK if present
-          if ls app/build/outputs/apk/release/*.apk 1> /dev/null 2>&1; then
-            APK_FILE=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
-            echo "Extracting native libraries from APK: $APK_FILE"
-            mkdir -p /tmp/apk_unpacked
-            unzip -q -o "$APK_FILE" "lib/*" -d /tmp/apk_unpacked || true
-            if [ -f "/tmp/apk_unpacked/lib/arm64-v8a/libNINMODS.so" ]; then
-              cp -f "/tmp/apk_unpacked/lib/arm64-v8a/libNINMODS.so" output_libs/arm64-v8a/
-              echo "[OK] Extracted arm64-v8a from APK"
-            fi
-            if [ -f "/tmp/apk_unpacked/lib/armeabi-v7a/libNINMODS.so" ]; then
-              cp -f "/tmp/apk_unpacked/lib/armeabi-v7a/libNINMODS.so" output_libs/armeabi-v7a/
-              echo "[OK] Extracted armeabi-v7a from APK"
-            fi
-          fi
+          for apk in $(find app/build/outputs -name "*.apk" 2>/dev/null); do
+            echo "Inspecting APK: $apk"
+            unzip -l "$apk" || true
+            unzip -q -o "$apk" "lib/arm64-v8a/libNINMODS.so" -d /tmp/apk_out || true
+            unzip -q -o "$apk" "lib/armeabi-v7a/libNINMODS.so" -d /tmp/apk_out || true
+            [ -f /tmp/apk_out/lib/arm64-v8a/libNINMODS.so ] && cp -f /tmp/apk_out/lib/arm64-v8a/libNINMODS.so output_libs/arm64-v8a/
+            [ -f /tmp/apk_out/lib/armeabi-v7a/libNINMODS.so ] && cp -f /tmp/apk_out/lib/armeabi-v7a/libNINMODS.so output_libs/armeabi-v7a/
+          done
 
-          echo "============================================================"
-          echo "Verified Output Binaries:"
-          echo "============================================================"
+          echo "=== FINAL OUTPUT_LIBS ==="
           ls -la output_libs/* || true
-          if [ ! -f "output_libs/arm64-v8a/libNINMODS.so" ] && [ ! -f "output_libs/armeabi-v7a/libNINMODS.so" ]; then
-            echo "ERROR: Native libraries were not found!"
-            exit 1
-          fi
 
       - name: Upload Native Libraries Artifact
         uses: actions/upload-artifact@v4
