@@ -75,7 +75,8 @@ TouchBridge& Touch() {
 
 bool ResolveTouchBridge() {
     TouchBridge& bridge = Touch();
-    if (bridge.resolved) return bridge.touchCount && bridge.getTouch;
+    if (bridge.resolved) return true;
+    if (!g_Il2CppReady.load()) return false;
 
     static const char* kImages[] = {
         "UnityEngine.InputLegacyModule.dll",
@@ -93,13 +94,12 @@ bool ResolveTouchBridge() {
         if (bridge.touchCount && bridge.getTouch) break;
     }
 
-    bridge.resolved = true;
     if (bridge.touchCount && bridge.getTouch) {
+        bridge.resolved = true;
         Logger::Log("touch bridge resolved through il2cpp");
-    } else {
-        Logger::Log("touch bridge unavailable; overlay stays visible but not interactive");
+        return true;
     }
-    return bridge.touchCount && bridge.getTouch;
+    return false;
 }
 
 void InitImGui() {
@@ -125,12 +125,11 @@ void ShutdownImGui() {
 
 void PumpTouch(ImGuiIO& io) {
     if (!Touch().resolved) {
-        static int s_frameCounter = 0;
-        if (++s_frameCounter < 30) return;
-        static bool s_attempted = false;
-        if (s_attempted && !g_Il2CppReady.load()) return;
-        s_attempted = true;
-        if (!ResolveTouchBridge()) return;
+        static int s_retryFrame = 0;
+        if (++s_retryFrame % 60 == 0) {
+            ResolveTouchBridge();
+        }
+        if (!Touch().resolved) return;
     }
     if (!Touch().touchCount || !Touch().getTouch) return;
 

@@ -79,31 +79,53 @@ inline const char* OutputDir() { return g_outputDir; }
 // ---------------------------------------------------------------------------
 // Output location
 // ---------------------------------------------------------------------------
-inline bool ResolveOutputDir(char* out, size_t outSize) {
-    static const char* kCandidates[] = {
-        "/storage/emulated/0/Download/NINMODS_DUMP",
-        "/sdcard/Download/NINMODS_DUMP",
-    };
-
-    for (const char* candidate : kCandidates) {
-        if (DumpWriter::EnsureDirectory(candidate)) {
-            if (!DumpWriter::EnsureDirectory(candidate)) continue;
-            snprintf(out, outSize, "%s", candidate);
-            return true;
-        }
-    }
-    return false;
-}
-
 inline std::string TargetPackage() {
     char buf[192] = {0};
     int fd = open("/proc/self/cmdline", O_RDONLY);
     if (fd >= 0) {
         ssize_t n = read(fd, buf, sizeof(buf) - 1);
         close(fd);
-        if (n > 0) return std::string(buf);
+        if (n > 0) {
+            buf[n] = '\0';
+            return std::string(buf);
+        }
     }
     return std::string("unknown_package");
+}
+
+inline bool IsWritableDir(const char* dir) {
+    if (!dir || !dir[0]) return false;
+    if (!DumpWriter::EnsureDirectory(dir)) return false;
+    char testPath[512];
+    snprintf(testPath, sizeof(testPath), "%s/.probe_%d", dir, (int)getpid());
+    int fd = open(testPath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) return false;
+    close(fd);
+    unlink(testPath);
+    return true;
+}
+
+inline bool ResolveOutputDir(char* out, size_t outSize) {
+    const std::string pkg = TargetPackage();
+
+    std::vector<std::string> candidates;
+    if (pkg != "unknown_package" && !pkg.empty()) {
+        candidates.push_back("/sdcard/Android/data/" + pkg + "/files/NINMODS_DUMP");
+        candidates.push_back("/storage/emulated/0/Android/data/" + pkg + "/files/NINMODS_DUMP");
+        candidates.push_back("/data/data/" + pkg + "/files/NINMODS_DUMP");
+        candidates.push_back("/data/user/0/" + pkg + "/files/NINMODS_DUMP");
+    }
+    candidates.push_back("/storage/emulated/0/Download/NINMODS_DUMP");
+    candidates.push_back("/sdcard/Download/NINMODS_DUMP");
+    candidates.push_back("/data/local/tmp/NINMODS_DUMP");
+
+    for (const std::string& candidate : candidates) {
+        if (IsWritableDir(candidate.c_str())) {
+            snprintf(out, outSize, "%s", candidate.c_str());
+            return true;
+        }
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
