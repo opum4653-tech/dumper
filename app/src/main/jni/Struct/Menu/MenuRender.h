@@ -8,10 +8,14 @@
 #include <unistd.h>
 
 #include "../../imgui/imgui.h"
+#include "../../imgui/imgui_internal.h"
 #include "../../Icon/TextureLoader.h"
 #include "../Core/DumperLifecycle.h"
 #include "../Dumper/Il2CppRealDumper.h"
 #include "../Dumper/OfficialDumperEngine.h"
+
+template<typename T>
+static inline T ImClampVal(T v, T mn, T mx) { return (v < mn) ? mn : (v > mx) ? mx : v; }
 
 static ImVec2 g_MenuPos(30.0f, 30.0f);
 static float  g_MenuWidth  = 440.0f;
@@ -145,8 +149,8 @@ inline void RenderMainModMenu(bool& menuOpen, int& currentTab) {
 
     const float maxX = (screenW > g_MenuWidth)  ? (screenW - g_MenuWidth)  : 0.0f;
     const float maxY = (screenH > g_MenuHeight) ? (screenH - g_MenuHeight) : 0.0f;
-    g_MenuPos.x = ImClamp(g_MenuPos.x, 0.0f, maxX);
-    g_MenuPos.y = ImClamp(g_MenuPos.y, 40.0f, maxY);
+    g_MenuPos.x = ImClampVal(g_MenuPos.x, 0.0f, maxX);
+    g_MenuPos.y = ImClampVal(g_MenuPos.y, 40.0f, maxY);
 
     ImGui::SetNextWindowPos(g_MenuPos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(g_MenuWidth, g_MenuHeight), ImGuiCond_Always);
@@ -186,8 +190,8 @@ inline void RenderMainModMenu(bool& menuOpen, int& currentTab) {
 
         if (s_dragTitle && ImGui::IsMouseDragging(0, 1.0f)) {
             const ImVec2 delta = ImGui::GetIO().MouseDelta;
-            g_MenuPos.x = ImClamp(g_MenuPos.x + delta.x, 0.0f, maxX);
-            g_MenuPos.y = ImClamp(g_MenuPos.y + delta.y, 0.0f, maxY);
+            g_MenuPos.x = ImClampVal(g_MenuPos.x + delta.x, 0.0f, maxX);
+            g_MenuPos.y = ImClampVal(g_MenuPos.y + delta.y, 0.0f, maxY);
         } else if (s_dragBody && ImGui::IsMouseDragging(0, 2.0f)) {
             ImGui::SetScrollY(ImGui::GetScrollY() - ImGui::GetIO().MouseDelta.y);
         }
