@@ -2,18 +2,16 @@ apply plugin: 'com.android.application'
 
 android {
     namespace 'com.ninmods.dumper'
-    ndkVersion '21.4.7075529'
-    compileSdkVersion 30
+    compileSdk 34
     defaultConfig {
         applicationId "com.ninmods.dumper"
-        minSdkVersion 19
-        targetSdkVersion 29
+        minSdk 21
+        targetSdk 34
         versionCode 1
         versionName "3.2"
         ndk {
             abiFilters 'armeabi-v7a', 'arm64-v8a'
         }
-        signingConfig signingConfigs.debug
     }
     buildTypes {
         release {
@@ -34,14 +32,8 @@ android {
             jniLibs.srcDirs = ['src/main/libs', 'libs']
         }
     }
-    externalNativeBuild {
-        ndkBuild {
-            path file('src/main/jni/Android.mk')
-        }
-    }
 }
 
-//dependencies must be placed below 'android' brackets to get it work on AIDE
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
 }
