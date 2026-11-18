@@ -88,26 +88,21 @@ jobs:
           find . -name "*.so" || true
           find . -name "*.apk" || true
           
-          mkdir -p output_libs/arm64-v8a output_libs/armeabi-v7a
+          mkdir -p output_libs/arm64-v8a output_libs/armeabi-v7a release_apks
           
           find . -name "libNINMODS.so" | while read -r f; do
             if echo "$f" | grep -q "arm64-v8a"; then
-              cp -f "$f" output_libs/arm64-v8a/
+              cp -f "$f" output_libs/arm64-v8a/ || true
             fi
             if echo "$f" | grep -q "armeabi-v7a"; then
-              cp -f "$f" output_libs/armeabi-v7a/
+              cp -f "$f" output_libs/armeabi-v7a/ || true
             fi
           done
 
-          mkdir -p release_apks
           for apk in $(find app/build/outputs -name "*.apk" 2>/dev/null); do
-            echo "Inspecting APK: $apk"
-            cp -f "$apk" release_apks/
+            echo "Processing APK: $apk"
+            cp -f "$apk" release_apks/ || true
             unzip -l "$apk" || true
-            unzip -q -o "$apk" "lib/arm64-v8a/libNINMODS.so" -d /tmp/apk_out || true
-            unzip -q -o "$apk" "lib/armeabi-v7a/libNINMODS.so" -d /tmp/apk_out || true
-            [ -f /tmp/apk_out/lib/arm64-v8a/libNINMODS.so ] && cp -f /tmp/apk_out/lib/arm64-v8a/libNINMODS.so output_libs/arm64-v8a/
-            [ -f /tmp/apk_out/lib/armeabi-v7a/libNINMODS.so ] && cp -f /tmp/apk_out/lib/armeabi-v7a/libNINMODS.so output_libs/armeabi-v7a/
           done
 
           echo "=== FINAL OUTPUT_LIBS ==="
