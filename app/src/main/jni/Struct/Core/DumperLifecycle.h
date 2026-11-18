@@ -1,4 +1,4 @@
-# Zygisk injection lifecycle: waits for the Il2Cpp runtime, then unlocks live inspection.
+// Zygisk injection lifecycle: waits for the Il2Cpp runtime, then unlocks live inspection.
 #pragma once
 
 #include <atomic>
