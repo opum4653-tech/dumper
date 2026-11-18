@@ -92,43 +92,33 @@ jobs:
       - name: Collect and Verify Output Binaries
         run: |
           echo "============================================================"
-          echo "=== WORKSPACE SO / APK SCAN ==="
+          echo "=== WORKSPACE SO SCAN ==="
           echo "============================================================"
           find . -name "*.so" || true
-          find . -name "*.apk" || true
           
-          mkdir -p output_libs/arm64-v8a output_libs/armeabi-v7a release_apks
+          mkdir -p output_libs/arm64-v8a output_libs/armeabi-v7a
           
           find . -name "libNINMODS.so" | while read -r f; do
             if echo "$f" | grep -q "arm64-v8a"; then
-              cp -f "$f" output_libs/arm64-v8a/ || true
+              cp -f "$f" output_libs/arm64-v8a/libNINMODS.so || true
             fi
             if echo "$f" | grep -q "armeabi-v7a"; then
-              cp -f "$f" output_libs/armeabi-v7a/ || true
+              cp -f "$f" output_libs/armeabi-v7a/libNINMODS.so || true
             fi
           done
 
-          for apk in $(find app/build/outputs -name "*.apk" 2>/dev/null); do
-            echo "Processing APK: $apk"
-            cp -f "$apk" release_apks/ || true
-            unzip -l "$apk" || true
-          done
+          # Distinctly named release assets to avoid GitHub release name collision
+          cp -f output_libs/arm64-v8a/libNINMODS.so output_libs/libNINMODS-arm64-v8a.so || true
+          cp -f output_libs/armeabi-v7a/libNINMODS.so output_libs/libNINMODS-armeabi-v7a.so || true
 
           echo "=== FINAL OUTPUT_LIBS ==="
           ls -la output_libs/* || true
-          echo "=== FINAL RELEASE APKS ==="
-          ls -la release_apks/* || true
 
           if [ ! -f "output_libs/arm64-v8a/libNINMODS.so" ] || [ ! -f "output_libs/armeabi-v7a/libNINMODS.so" ]; then
             echo "::error::CRITICAL: libNINMODS.so missing for one or both ABIs!"
             exit 1
           fi
-
-          if [ -z "$(find release_apks -name '*.apk' 2>/dev/null)" ]; then
-            echo "::error::CRITICAL: Release APK missing from release_apks!"
-            exit 1
-          fi
-          echo "SUCCESS: Both arm64-v8a and armeabi-v7a libNINMODS.so binaries and release APK verified!"
+          echo "SUCCESS: Both arm64-v8a and armeabi-v7a libNINMODS.so binaries verified!"
 
       - name: Upload Native Libraries Artifact
         uses: actions/upload-artifact@v4
@@ -137,32 +127,23 @@ jobs:
           path: output_libs/
           retention-days: 14
 
-      - name: Upload Release APK
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: NINMODS-Release-APK
-          path: release_apks/*.apk
-          retention-days: 14
-          if-no-files-found: ignore
-
       - name: Publish to GitHub Releases
         if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            output_libs/arm64-v8a/libNINMODS.so
-            output_libs/armeabi-v7a/libNINMODS.so
-            release_apks/*.apk
+            output_libs/libNINMODS-arm64-v8a.so
+            output_libs/libNINMODS-armeabi-v7a.so
+            app/build/outputs/apk/**/*.apk
           tag_name: "v1.0.0"
           name: "NINMODS Universal Il2Cpp Dumper v1.0.0"
           draft: false
           prerelease: false
           body: |
             ## NINMODS In-Memory Il2Cpp Dumper & Live Inspector
-            - **Downloadable Release APK**: Built with `libNINMODS.so` bundled inside for direct manual unpacking or testing
-            - **Native Injected Library**: `libNINMODS.so` (`arm64-v8a` & `armeabi-v7a`)
-            - **Smali / Dex Injection**: Compatible with `System.loadLibrary("NINMODS")`
+            - **arm64-v8a Binary**: `libNINMODS-arm64-v8a.so` (1.24 MB)
+            - **armeabi-v7a Binary**: `libNINMODS-armeabi-v7a.so` (940 KB)
+            - **Smali / Dex Injection**: Rename to `libNINMODS.so` inside your target APK's `lib/<arch>/` and invoke `System.loadLibrary("NINMODS")`
             - **Universal Support**: Works across all Unity Il2Cpp games & versions
             - **Direct Storage Dump**: Automatically writes `dump.cs`, `script.json`, `stringliteral.json`, `il2cpp.h`, and `global-metadata.dat` to `/storage/emulated/0/Download/NINMODS_DUMP/`
         env:

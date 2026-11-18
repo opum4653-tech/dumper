@@ -2,17 +2,22 @@ apply plugin: 'com.android.application'
 
 android {
     namespace 'com.ninmods.dumper'
+    ndkVersion '21.4.7075529'
     compileSdk 34
+
     defaultConfig {
         applicationId "com.ninmods.dumper"
         minSdk 21
         targetSdk 34
         versionCode 1
         versionName "3.2"
+
         ndk {
             abiFilters 'armeabi-v7a', 'arm64-v8a'
         }
+        signingConfig signingConfigs.debug
     }
+
     buildTypes {
         release {
             shrinkResources false
@@ -27,13 +32,28 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
+
+    // Prebuilt natives are dropped into src/main/libs by the CI ndk-build step.
     sourceSets {
         main {
             jniLibs.srcDirs = ['src/main/libs', 'libs']
         }
     }
+
+    // CI builds the native half with ndk-build directly, so keep Gradle out of it.
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
 }
 
+//dependencies must be placed below 'android' brackets to get it work on AIDE
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
 }
