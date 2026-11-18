@@ -85,14 +85,46 @@ jobs:
         run: |
           ./gradlew assembleRelease --no-daemon --stacktrace || true
 
-      - name: Verify Output Binaries
+      - name: Collect and Verify Output Binaries
         run: |
           echo "============================================================"
-          echo "Output Binaries Verification:"
+          echo "Collecting compiled native libraries from all build stages..."
+          echo "============================================================"
+          mkdir -p output_libs/arm64-v8a
+          mkdir -p output_libs/armeabi-v7a
+
+          # 1. Search for any built libNINMODS.so across the workspace
+          find . -type f -name "libNINMODS.so" | while read -r libPath; do
+            echo "Found compiled library: $libPath"
+            if echo "$libPath" | grep -q "arm64-v8a"; then
+              cp -f "$libPath" output_libs/arm64-v8a/
+            elif echo "$libPath" | grep -q "armeabi-v7a"; then
+              cp -f "$libPath" output_libs/armeabi-v7a/
+            fi
+          done
+
+          # 2. Extract from generated release APK if present
+          if ls app/build/outputs/apk/release/*.apk 1> /dev/null 2>&1; then
+            APK_FILE=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
+            echo "Extracting native libraries from APK: $APK_FILE"
+            mkdir -p /tmp/apk_unpacked
+            unzip -q -o "$APK_FILE" "lib/*" -d /tmp/apk_unpacked || true
+            if [ -f "/tmp/apk_unpacked/lib/arm64-v8a/libNINMODS.so" ]; then
+              cp -f "/tmp/apk_unpacked/lib/arm64-v8a/libNINMODS.so" output_libs/arm64-v8a/
+              echo "[OK] Extracted arm64-v8a from APK"
+            fi
+            if [ -f "/tmp/apk_unpacked/lib/armeabi-v7a/libNINMODS.so" ]; then
+              cp -f "/tmp/apk_unpacked/lib/armeabi-v7a/libNINMODS.so" output_libs/armeabi-v7a/
+              echo "[OK] Extracted armeabi-v7a from APK"
+            fi
+          fi
+
+          echo "============================================================"
+          echo "Verified Output Binaries:"
           echo "============================================================"
           ls -la output_libs/* || true
           if [ ! -f "output_libs/arm64-v8a/libNINMODS.so" ] && [ ! -f "output_libs/armeabi-v7a/libNINMODS.so" ]; then
-            echo "ERROR: Native libraries were not generated!"
+            echo "ERROR: Native libraries were not found!"
             exit 1
           fi
 
