@@ -53,6 +53,9 @@ const char*   Il2CppEnumerationMode();
 // Class
 // ---------------------------------------------------------------------------
 const void*   Il2CppGetClassType(const void* image, const char* namespaze, const char* clazz);
+const void*   Il2CppClassFromType(const void* type);
+int32_t       Il2CppClassGetValueSize(const void* klass, uint32_t* align);
+int32_t       Il2CppClassGetInstanceSize(const void* klass);
 const char*   Il2CppClassGetName(const void* klass);
 const char*   Il2CppClassGetNamespace(const void* klass);
 const void*   Il2CppClassGetParent(const void* klass);

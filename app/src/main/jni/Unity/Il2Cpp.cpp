@@ -37,10 +37,11 @@ namespace {
 NINMODS_IL2CPP_API_LIST(NINMODS_API_STORAGE)
 #undef NINMODS_API_STORAGE
 
-uintptr_t      g_base = 0;
-bool           g_attached = false;
-std::once_flag g_attachOnce;
-std::mutex     g_cacheMutex;
+uintptr_t  g_base = 0;
+bool       g_attached = false;      // every required export bound
+bool       g_bindComplete = false;  // the bind pass actually ran to completion
+std::mutex g_attachMutex;
+std::mutex g_cacheMutex;
 
 std::string g_missing;
 
@@ -116,107 +117,80 @@ void Il2CppSetBase(uintptr_t base) { g_base = base; }
 uintptr_t Il2CppGetBase() { return g_base; }
 
 void Il2CppAttach() {
-    std::call_once(g_attachOnce, []() {
-        void* handle = xdl_open("libil2cpp.so", 0);
-        if (!handle) {
-            handle = xdl_open("libil2cpp.so", XDL_TRY_FORCE_LOAD);
-        }
-        if (!handle) {
-            __android_log_print(ANDROID_LOG_ERROR, NINMODS_TAG,
-                                "libil2cpp.so not mapped; attach skipped");
-            return;
-        }
+    std::lock_guard<std::mutex> lock(g_attachMutex);
+    if (g_bindComplete) return;
 
-        if (!g_base) {
+    void* handle = xdl_open("libil2cpp.so", 0);
+    if (!handle) {
+        // The module is normally already mapped into the game process. A forced
+        // load is a last resort and is only tried when the plain open failed.
+        handle = xdl_open("libil2cpp.so", XDL_TRY_FORCE_LOAD);
+    }
+    if (!handle) {
+        __android_log_print(ANDROID_LOG_ERROR, NINMODS_TAG,
+                            "libil2cpp.so not mapped; attach skipped");
+        return;
+    }
+
+    if (!g_base) {
+        // dli_fbase is the lowest mapping of the object, which is
+        // loadBias + align_down(first PT_LOAD p_vaddr, page). Running the ELF
+        // header parse on it converts that back to the load bias that turns a
+        // vaddr into a runtime address.
+        void* anchor = xdl_sym(handle, "il2cpp_domain_get", nullptr);
+        if (!anchor) anchor = xdl_sym(handle, "il2cpp_class_from_name", nullptr);
+
+        Dl_info dli;
+        if (anchor && dladdr(anchor, &dli) && dli.dli_fbase) {
+            const uintptr_t lowest = (uintptr_t)dli.dli_fbase;
             ElfImage::Info info;
-            uintptr_t lowest = 0;
-            // xdl_info gives the loader's own idea of the base, which already
-            // accounts for the first segment's vaddr.
-            void* img = dlsym(handle, "il2cpp_domain_get");
-            if (!img) img = (void*)&il2cpp_domain_get;
-            Dl_info dli;
-            if (img && dladdr(img, &dli) && dli.dli_fbase) {
-                lowest = (uintptr_t)dli.dli_fbase;
-            }
-            if (lowest) {
-                if (ElfImage::Parse(lowest, info)) {
-                    g_base = (uintptr_t)info.loadBias;
-                } else {
-                    g_base = lowest;
-                }
+            if (ElfImage::Parse(lowest, info)) {
+                g_base = (uintptr_t)info.loadBias;
+                __android_log_print(ANDROID_LOG_INFO, NINMODS_TAG,
+                                    "libil2cpp lowest=0x%lx firstVaddr=0x%llx bias=0x%lx",
+                                    (unsigned long)lowest, (unsigned long long)info.minVaddr,
+                                    (unsigned long)g_base);
+            } else {
+                // Header unreadable: the lowest mapping is the only anchor left,
+                // and for a normal linker layout (first PT_LOAD at vaddr 0) it is
+                // also the bias.
+                g_base = lowest;
             }
         }
+    }
 
-        g_missing.clear();
-        auto bind = [&](const char* name) -> void* {
-            void* p = xdl_sym(handle, name, nullptr);
-            if (!p) p = xdl_dsym(handle, name, nullptr);
-            if (!p) {
-                if (!g_missing.empty()) g_missing += "\n";
-                g_missing += name;
-            }
-            return p;
-        };
+    g_missing.clear();
+    auto bind = [&](const char* name) -> void* {
+        void* p = xdl_sym(handle, name, nullptr);
+        if (!p) p = xdl_dsym(handle, name, nullptr);
+        if (!p) {
+            if (!g_missing.empty()) g_missing += "\n";
+            g_missing += name;
+        }
+        return p;
+    };
 
 #define NINMODS_API_BIND(ret, name, params) *(void**)(&name) = bind(#name);
-        NINMODS_IL2CPP_API_LIST(NINMODS_API_BIND)
+    NINMODS_IL2CPP_API_LIST(NINMODS_API_BIND)
 #undef NINMODS_API_BIND
 
-        // Fallback pattern scanning for il2cpp_domain_get when stripped
-        if (!il2cpp_domain_get && g_base) {
-            ElfImage::Info elfInfo;
-            if (ElfImage::Parse(g_base, elfInfo)) {
-                for (const auto& seg : elfInfo.segments) {
-                    if (seg.type != PT_LOAD || !(seg.flags & PF_X)) continue;
-                    uintptr_t segStart = (uintptr_t)(elfInfo.loadBias + seg.vaddr);
-                    uintptr_t segEnd = segStart + seg.memsz;
-#if defined(__aarch64__)
-                    for (uintptr_t p = segStart; p + 12 <= segEnd; p += 4) {
-                        uint32_t insn0 = 0, insn1 = 0, insn2 = 0;
-                        if (!SafeMemory::ReadUint32(p, &insn0) ||
-                            !SafeMemory::ReadUint32(p + 4, &insn1) ||
-                            !SafeMemory::ReadUint32(p + 8, &insn2)) continue;
-                        if (insn2 == 0xD65F03C0 && // RET
-                            (insn1 & 0xFFC003E0) == 0xF9400000 && // LDR X0, [X0, #imm]
-                            (insn0 & 0x9F00001F) == 0x90000000) {  // ADRP X0, #page
-                            uint64_t immlo = (insn0 >> 29) & 3;
-                            int64_t immhi = (insn0 >> 5) & 0x7FFFF;
-                            if (immhi & 0x40000) immhi |= ~0x7FFFFULL;
-                            int64_t imm = (immhi << 2) | immlo;
-                            uintptr_t page = ((p) & ~0xFFFULL) + (imm << 12);
-                            uint32_t ldrOffset = ((insn1 >> 10) & 0xFFF) << 3;
-                            uintptr_t targetAddr = page + ldrOffset;
-                            uintptr_t domainPtr = 0;
-                            if (SafeMemory::ReadPtr(targetAddr, &domainPtr) && domainPtr > 0x1000) {
-                                if (SafeMemory::IsReadable(domainPtr, 32)) {
-                                    *(void**)&il2cpp_domain_get = (void*)p;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-#endif
-                }
-            }
-        }
+    xdl_close(handle);
 
-        xdl_close(handle);
+    g_bindComplete = true;
+    g_attached = CoreBound();
 
-        g_attached = (il2cpp_domain_get != nullptr) || CoreBound();
-        __android_log_print(g_attached ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, NINMODS_TAG,
-                            "attach base=0x%lx core=%s missing=%zu",
-                            (unsigned long)g_base, g_attached ? "ok" : "fail",
-                            g_missing.empty() ? 0 : 1);
+    __android_log_print(g_attached ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, NINMODS_TAG,
+                        "attach base=0x%lx core=%s",
+                        (unsigned long)g_base, g_attached ? "ok" : "fail");
 
-        if (il2cpp_domain_get && il2cpp_thread_attach) {
-            void* domain = il2cpp_domain_get();
-            if (domain) il2cpp_thread_attach(domain);
-        }
-    });
+    if (g_attached && il2cpp_domain_get && il2cpp_thread_attach) {
+        void* domain = il2cpp_domain_get();
+        if (domain) il2cpp_thread_attach(domain);
+    }
 }
 
 bool Il2CppIsReady() {
-    if (!g_attached) Il2CppAttach();
+    if (!g_bindComplete) Il2CppAttach();
     return g_attached;
 }
 
@@ -247,87 +221,42 @@ const char* Il2CppMissingApis() {
 // ---------------------------------------------------------------------------
 size_t Il2CppGetAssemblyCount() {
     if (!Il2CppIsReady()) return 0;
-    void* domain = il2cpp_domain_get ? il2cpp_domain_get() : nullptr;
+    if (!il2cpp_domain_get || !il2cpp_domain_get_assemblies) return 0;
+
+    void* domain = il2cpp_domain_get();
     if (!domain) return 0;
-    if (il2cpp_domain_get_assemblies) {
-        size_t count = 0;
-        void** assemblies = il2cpp_domain_get_assemblies(domain, &count);
-        if (assemblies && count) return count;
-    }
-    // Fallback vector scan in Il2CppDomain
-    for (size_t off = 0; off + 3 * sizeof(void*) <= 256; off += sizeof(void*)) {
-        uintptr_t start = 0, finish = 0, end = 0;
-        if (SafeMemory::ReadPtr((uintptr_t)domain + off, &start) &&
-            SafeMemory::ReadPtr((uintptr_t)domain + off + sizeof(void*), &finish) &&
-            SafeMemory::ReadPtr((uintptr_t)domain + off + 2 * sizeof(void*), &end)) {
-            if (start > 0x1000 && finish >= start && end >= finish) {
-                size_t cnt = (finish - start) / sizeof(void*);
-                if (cnt > 0 && cnt < 500) {
-                    uintptr_t firstAssem = 0;
-                    if (SafeMemory::ReadPtr(start, &firstAssem) && firstAssem > 0x1000) {
-                        return cnt;
-                    }
-                }
-            }
-        }
-    }
-    return 0;
+
+    size_t count = 0;
+    void** assemblies = il2cpp_domain_get_assemblies(domain, &count);
+    if (!assemblies || count == 0 || count > 10000) return 0;
+    return count;
 }
 
 const void* Il2CppGetAssembly(size_t index) {
     if (!Il2CppIsReady()) return nullptr;
-    void* domain = il2cpp_domain_get ? il2cpp_domain_get() : nullptr;
+    if (!il2cpp_domain_get || !il2cpp_domain_get_assemblies) return nullptr;
+
+    void* domain = il2cpp_domain_get();
     if (!domain) return nullptr;
-    if (il2cpp_domain_get_assemblies) {
-        size_t count = 0;
-        void** assemblies = il2cpp_domain_get_assemblies(domain, &count);
-        if (assemblies && index < count) return assemblies[index];
-    }
-    for (size_t off = 0; off + 3 * sizeof(void*) <= 256; off += sizeof(void*)) {
-        uintptr_t start = 0, finish = 0, end = 0;
-        if (SafeMemory::ReadPtr((uintptr_t)domain + off, &start) &&
-            SafeMemory::ReadPtr((uintptr_t)domain + off + sizeof(void*), &finish) &&
-            SafeMemory::ReadPtr((uintptr_t)domain + off + 2 * sizeof(void*), &end)) {
-            if (start > 0x1000 && finish >= start && end >= finish) {
-                size_t cnt = (finish - start) / sizeof(void*);
-                if (index < cnt) {
-                    uintptr_t assem = 0;
-                    if (SafeMemory::ReadPtr(start + index * sizeof(void*), &assem)) {
-                        return (const void*)assem;
-                    }
-                }
-            }
-        }
-    }
-    return nullptr;
+
+    size_t count = 0;
+    void** assemblies = il2cpp_domain_get_assemblies(domain, &count);
+    if (!assemblies || index >= count) return nullptr;
+    return assemblies[index];
 }
 
 const void* Il2CppAssemblyGetImage(const void* assembly) {
-    if (!assembly) return nullptr;
-    if (il2cpp_assembly_get_image) return il2cpp_assembly_get_image(assembly);
-    // In Il2CppAssembly, image is the first pointer member
-    uintptr_t img = 0;
-    if (SafeMemory::ReadPtr((uintptr_t)assembly, &img) && img > 0x1000) {
-        return (const void*)img;
-    }
-    return nullptr;
+    // Il2CppAssembly's image field position is not stable across versions, so
+    // it is only read through the export. No layout guess is made here.
+    if (!assembly || !il2cpp_assembly_get_image) return nullptr;
+    return il2cpp_assembly_get_image(assembly);
 }
 
 const char* Il2CppImageGetName(const void* image) {
     if (!image) return "";
-    if (il2cpp_image_get_name) {
-        const char* name = il2cpp_image_get_name(image);
-        if (name && name[0] != '\0') return name;
-    }
-    // In Il2CppImage, name is the first pointer member
-    uintptr_t namePtr = 0;
-    if (SafeMemory::ReadPtr((uintptr_t)image, &namePtr) && namePtr > 0x1000) {
-        static thread_local char s_nameBuf[128];
-        if (SafeMemory::ReadCString(namePtr, s_nameBuf, sizeof(s_nameBuf))) {
-            return s_nameBuf;
-        }
-    }
-    return "";
+    if (!il2cpp_image_get_name) return "";
+    const char* name = il2cpp_image_get_name(image);
+    return name ? name : "";
 }
 
 const void* Il2CppGetImageByName(const char* imageName) {
@@ -596,6 +525,21 @@ const void* Il2CppClassGetImage(const void* klass) {
     return nullptr;
 }
 
+const void* Il2CppClassFromType(const void* type) {
+    if (!type || !il2cpp_class_from_type) return nullptr;
+    return il2cpp_class_from_type(type);
+}
+
+int32_t Il2CppClassGetValueSize(const void* klass, uint32_t* align) {
+    if (!klass || !il2cpp_class_value_size) return 0;
+    return il2cpp_class_value_size((void*)klass, align);
+}
+
+int32_t Il2CppClassGetInstanceSize(const void* klass) {
+    if (!klass || !il2cpp_class_instance_size) return 0;
+    return il2cpp_class_instance_size((void*)klass);
+}
+
 // ---------------------------------------------------------------------------
 // Field
 // ---------------------------------------------------------------------------
@@ -605,31 +549,19 @@ void* Il2CppClassGetFields(const void* klass, void** iter) {
 }
 
 const char* Il2CppFieldGetName(const void* field) {
-    if (!field) return "";
-    if (il2cpp_field_get_name) {
-        const char* name = il2cpp_field_get_name((void*)field);
-        return name ? name : "";
-    }
-    const char* name = *(const char* const*)field;
+    if (!field || !il2cpp_field_get_name) return "";
+    const char* name = il2cpp_field_get_name((void*)field);
     return name ? name : "";
 }
 
 size_t Il2CppFieldGetOffset(const void* field) {
-    if (!field) return 0;
-    if (il2cpp_field_get_offset) {
-        return il2cpp_field_get_offset((void*)field);
-    }
-    // Direct struct layout fallback (Unity FieldInfo: name, type, parent, offset)
-    int32_t off = *(const int32_t*)((const uint8_t*)field + 3 * sizeof(void*));
-    return off >= 0 ? (size_t)off : 0;
+    if (!field || !il2cpp_field_get_offset) return 0;
+    return il2cpp_field_get_offset((void*)field);
 }
 
 const void* Il2CppFieldGetType(const void* field) {
-    if (!field) return nullptr;
-    if (il2cpp_field_get_type) {
-        return il2cpp_field_get_type((void*)field);
-    }
-    return *(const void* const*)((const uint8_t*)field + sizeof(void*));
+    if (!field || !il2cpp_field_get_type) return nullptr;
+    return il2cpp_field_get_type((void*)field);
 }
 
 int Il2CppFieldGetFlags(const void* field) {

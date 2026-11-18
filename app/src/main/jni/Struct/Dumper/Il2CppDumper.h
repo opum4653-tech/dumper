@@ -171,20 +171,14 @@ inline size_t TypeSize(const void* type) {
             return sizeof(void*);
         case 0x11:                                              // valuetype
         case 0x55: {                                            // enum
-            if (il2cpp_class_from_type && il2cpp_class_value_size) {
-                void* klass = il2cpp_class_from_type(type);
-                if (klass) {
-                    uint32_t align = 0;
-                    const int32_t size = il2cpp_class_value_size(klass, &align);
-                    if (size > 0 && size < 4096) return (size_t)size;
-                }
-            }
-            if (il2cpp_class_from_type && il2cpp_class_instance_size) {
-                void* klass = il2cpp_class_from_type(type);
-                if (klass) {
-                    const int32_t size = il2cpp_class_instance_size(klass);
-                    if (size > 0 && size < 65536) return (size_t)size;
-                }
+            const void* klass = Il2CppClassFromType(type);
+            if (klass) {
+                uint32_t align = 0;
+                const int32_t valSize = Il2CppClassGetValueSize(klass, &align);
+                if (valSize > 0 && valSize < 4096) return (size_t)valSize;
+
+                const int32_t instSize = Il2CppClassGetInstanceSize(klass);
+                if (instSize > 0 && instSize < 65536) return (size_t)instSize;
             }
             return 0;
         }
@@ -282,12 +276,8 @@ inline void CollectMethod(const void* method, MethodSnapshot& out) {
     out.paramCount = Il2CppMethodGetParamCount(method);
     out.flags = Il2CppMethodGetFlags(method);
 
-    if (il2cpp_type_get_name) {
-        out.returnType = CopyTypeName(Il2CppMethodGetReturnType(method));
-        if (out.returnType.empty()) out.returnType = "void";
-    } else {
-        out.returnType = "void";
-    }
+    out.returnType = CopyTypeName(Il2CppMethodGetReturnType(method));
+    if (out.returnType.empty()) out.returnType = "void";
 
     if (out.paramCount > 0 && out.paramCount < 64) {
         out.params.reserve(out.paramCount);
@@ -337,7 +327,7 @@ inline bool CollectClass(const void* klass, const char* imageName, ClassSnapshot
     out.isAbstract = Il2CppClassIsAbstract(klass);
     out.isGeneric = Il2CppClassIsGeneric(klass);
 
-    if (il2cpp_class_instance_size) out.instanceSize = il2cpp_class_instance_size((void*)klass);
+    out.instanceSize = Il2CppClassGetInstanceSize(klass);
 
     const void* parent = Il2CppClassGetParent(klass);
     if (parent) out.parentName = Il2CppClassGetName(parent);
@@ -997,8 +987,8 @@ inline void WriteHookGenerator(const std::string& path) {
         "                    print('    // logic')\n"
         "                    print('    return orig_%s_%s(instance);' % (current_class, name))\n"
         "                    print('}')\n"
-        "                    print('// DobbyHook((void*)(il2cpp_base + 0x%s),' % pending_rva)\n")
-        "                    print('//            (void*)hook_%s_%s,' % (current_class, name))\n")
+        "                    print('// DobbyHook((void*)(il2cpp_base + 0x%s),' % pending_rva)\n"
+        "                    print('//            (void*)hook_%s_%s,' % (current_class, name))\n"
         "                    print('//            (void**)&orig_%s_%s);' % (current_class, name))\n"
         "                pending_rva = None\n"
         "    print('matches: %d' % hits)\n"

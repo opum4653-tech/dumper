@@ -23,6 +23,7 @@
     X(const void *,      il2cpp_get_corlib,                 (void))                      \
     X(const void *,      il2cpp_class_get_image,            (void *klass))               \
     /* class */                                                                          \
+    X(void,              il2cpp_class_for_each,             (void (*klassReportFunc)(void *klass, void *userData), void *userData)) \
     X(void *,            il2cpp_class_from_name,            (const void *image, const char *namespaze, const char *name)) \
     X(void *,            il2cpp_class_from_system_type,     (void *reflectionType))      \
     X(void *,            il2cpp_class_from_type,            (const void *type))          \
