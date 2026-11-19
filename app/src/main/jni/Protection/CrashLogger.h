@@ -10,6 +10,7 @@
 #include <ucontext.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <fcntl.h>
 #include <android/log.h>
 
 namespace Logger {

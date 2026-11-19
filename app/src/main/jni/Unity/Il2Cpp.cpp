@@ -775,6 +775,22 @@ const void* Il2CppGetMethod(const char* image, const char* namespaze, const char
     return Il2CppGetMethod(img, namespaze, clazz, name, argsCount);
 }
 
+const void* Il2CppClassGetMethodFromName(const void* klass, const char* name, int argsCount) {
+    if (!klass || !name || !il2cpp_class_get_method_from_name) return nullptr;
+    return il2cpp_class_get_method_from_name((void*)klass, name, argsCount);
+}
+
+void* Il2CppRuntimeInvoke(const void* method, void* obj, void** params, void** exc) {
+    if (!method || !il2cpp_runtime_invoke) return nullptr;
+    return il2cpp_runtime_invoke(method, obj, params, exc);
+}
+
+void* Il2CppObjectUnbox(void* obj) {
+    if (!obj) return nullptr;
+    if (il2cpp_object_unbox) return il2cpp_object_unbox(obj);
+    return (void*)((uintptr_t)obj + sizeof(void*) * 2);
+}
+
 void* Il2CppGetMethodOffset(const void* image, const char* namespaze, const char* clazz,
                             const char* name, int argsCount) {
     const void* klass = Il2CppGetClassType(image, namespaze, clazz);

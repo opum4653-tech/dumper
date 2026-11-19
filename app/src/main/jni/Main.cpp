@@ -132,12 +132,10 @@ bool ResolveTouchBridge() {
         return false;
     }
 
-    if (il2cpp_class_get_method_from_name) {
-        bridge.methodTouchCount     = il2cpp_class_get_method_from_name((void*)foundKlass, "get_touchCount", 0);
-        bridge.methodMousePosition  = il2cpp_class_get_method_from_name((void*)foundKlass, "get_mousePosition", 0);
-        bridge.methodGetMouseButton = il2cpp_class_get_method_from_name((void*)foundKlass, "GetMouseButton", 1);
-        bridge.methodGetTouch       = il2cpp_class_get_method_from_name((void*)foundKlass, "GetTouch", 1);
-    }
+    bridge.methodTouchCount     = Il2CppClassGetMethodFromName(foundKlass, "get_touchCount", 0);
+    bridge.methodMousePosition  = Il2CppClassGetMethodFromName(foundKlass, "get_mousePosition", 0);
+    bridge.methodGetMouseButton = Il2CppClassGetMethodFromName(foundKlass, "GetMouseButton", 1);
+    bridge.methodGetTouch       = Il2CppClassGetMethodFromName(foundKlass, "GetTouch", 1);
 
     bridge.codeTouchCount     = bridge.methodTouchCount ? Il2CppMethodGetPointer(bridge.methodTouchCount) : nullptr;
     bridge.codeMousePosition  = bridge.methodMousePosition ? Il2CppMethodGetPointer(bridge.methodMousePosition) : nullptr;
@@ -160,12 +158,11 @@ bool ResolveTouchBridge() {
 }
 
 int GetSafeTouchCount(const TouchBridge& bridge) {
-    if (bridge.methodTouchCount && il2cpp_runtime_invoke) {
+    if (bridge.methodTouchCount) {
         void* exc = nullptr;
-        void* res = il2cpp_runtime_invoke(bridge.methodTouchCount, nullptr, nullptr, &exc);
+        void* res = Il2CppRuntimeInvoke(bridge.methodTouchCount, nullptr, nullptr, &exc);
         if (!exc && res) {
-            void* unboxed = il2cpp_object_unbox ? il2cpp_object_unbox(res)
-                                                : (void*)((uintptr_t)res + sizeof(void*) * 2);
+            void* unboxed = Il2CppObjectUnbox(res);
             if (unboxed) return *(int*)unboxed;
         }
     }
@@ -177,13 +174,12 @@ int GetSafeTouchCount(const TouchBridge& bridge) {
 }
 
 bool GetSafeMouseButton(const TouchBridge& bridge, int button) {
-    if (bridge.methodGetMouseButton && il2cpp_runtime_invoke) {
+    if (bridge.methodGetMouseButton) {
         void* exc = nullptr;
         void* args[1] = { &button };
-        void* res = il2cpp_runtime_invoke(bridge.methodGetMouseButton, nullptr, args, &exc);
+        void* res = Il2CppRuntimeInvoke(bridge.methodGetMouseButton, nullptr, args, &exc);
         if (!exc && res) {
-            void* unboxed = il2cpp_object_unbox ? il2cpp_object_unbox(res)
-                                                : (void*)((uintptr_t)res + sizeof(void*) * 2);
+            void* unboxed = Il2CppObjectUnbox(res);
             if (unboxed) return *(bool*)unboxed;
         }
     }
@@ -195,12 +191,11 @@ bool GetSafeMouseButton(const TouchBridge& bridge, int button) {
 }
 
 bool GetSafeMousePosition(const TouchBridge& bridge, UnityVector3& outPos) {
-    if (bridge.methodMousePosition && il2cpp_runtime_invoke) {
+    if (bridge.methodMousePosition) {
         void* exc = nullptr;
-        void* res = il2cpp_runtime_invoke(bridge.methodMousePosition, nullptr, nullptr, &exc);
+        void* res = Il2CppRuntimeInvoke(bridge.methodMousePosition, nullptr, nullptr, &exc);
         if (!exc && res) {
-            void* unboxed = il2cpp_object_unbox ? il2cpp_object_unbox(res)
-                                                : (void*)((uintptr_t)res + sizeof(void*) * 2);
+            void* unboxed = Il2CppObjectUnbox(res);
             if (unboxed) {
                 outPos = *(UnityVector3*)unboxed;
                 return true;
@@ -211,13 +206,12 @@ bool GetSafeMousePosition(const TouchBridge& bridge, UnityVector3& outPos) {
 }
 
 bool GetSafeTouch(const TouchBridge& bridge, int index, UnityTouch& outTouch) {
-    if (bridge.methodGetTouch && il2cpp_runtime_invoke) {
+    if (bridge.methodGetTouch) {
         void* exc = nullptr;
         void* args[1] = { &index };
-        void* res = il2cpp_runtime_invoke(bridge.methodGetTouch, nullptr, args, &exc);
+        void* res = Il2CppRuntimeInvoke(bridge.methodGetTouch, nullptr, args, &exc);
         if (!exc && res) {
-            void* unboxed = il2cpp_object_unbox ? il2cpp_object_unbox(res)
-                                                : (void*)((uintptr_t)res + sizeof(void*) * 2);
+            void* unboxed = Il2CppObjectUnbox(res);
             if (unboxed) {
                 outTouch = *(UnityTouch*)unboxed;
                 return true;
