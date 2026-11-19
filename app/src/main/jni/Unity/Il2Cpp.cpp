@@ -280,6 +280,20 @@ const char* Il2CppImageGetName(const void* image) {
     return name ? name : "";
 }
 
+static bool ImageNameMatches(const char* actual, const char* target) {
+    if (!actual || !target) return false;
+    if (strcmp(actual, target) == 0) return true;
+    if (strcasecmp(actual, target) == 0) return true;
+
+    size_t lenA = strlen(actual);
+    size_t lenT = strlen(target);
+    if (lenA > 4 && strcasecmp(actual + lenA - 4, ".dll") == 0) lenA -= 4;
+    if (lenT > 4 && strcasecmp(target + lenT - 4, ".dll") == 0) lenT -= 4;
+
+    if (lenA == lenT && strncasecmp(actual, target, lenA) == 0) return true;
+    return false;
+}
+
 const void* Il2CppGetImageByName(const char* imageName) {
     if (!imageName) return nullptr;
     if (!Il2CppIsReady()) return nullptr;
@@ -289,7 +303,7 @@ const void* Il2CppGetImageByName(const char* imageName) {
         const void* image = Il2CppAssemblyGetImage(Il2CppGetAssembly(i));
         if (!image) continue;
         const char* name = Il2CppImageGetName(image);
-        if (name && strcmp(name, imageName) == 0) return image;
+        if (name && ImageNameMatches(name, imageName)) return image;
     }
     return nullptr;
 }

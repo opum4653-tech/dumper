@@ -36,12 +36,25 @@ static bool g_imGuiReady = false;
 static std::mutex g_renderMutex;
 
 // ---------------------------------------------------------------------------
-// UnityEngine.Input bridge. Reads mousePosition (Vector3) and touchCount/GetMouseButton.
+// UnityEngine.Input bridge. Reads mousePosition (Vector3) and touchCount/GetMouseButton/GetTouch.
 // ---------------------------------------------------------------------------
 struct UnityVector3 {
     float x;
     float y;
     float z;
+};
+
+struct UnityTouch {
+    int   fingerId;           // 0x00
+    float posX;               // 0x04
+    float posY;               // 0x08
+    float rawPosX;            // 0x0C
+    float rawPosY;            // 0x10
+    float deltaX;             // 0x14
+    float deltaY;             // 0x18
+    float deltaTime;          // 0x1C
+    int   tapCount;           // 0x20
+    int   phase;              // 0x24 (0=Began, 1=Moved, 2=Stationary, 3=Ended, 4=Canceled)
 };
 
 namespace {
@@ -50,9 +63,11 @@ struct TouchBridge {
     const void* methodTouchCount     = nullptr;
     const void* methodMousePosition  = nullptr;
     const void* methodGetMouseButton = nullptr;
+    const void* methodGetTouch       = nullptr;
     void*       codeTouchCount       = nullptr;
     void*       codeMousePosition    = nullptr;
     void*       codeGetMouseButton   = nullptr;
+    void*       codeGetTouch         = nullptr;
     bool        resolved             = false;
 };
 
@@ -68,40 +83,84 @@ bool ResolveTouchBridge() {
 
     Il2CppThreadAttach();
 
-    static const char* kImages[] = {
-        "UnityEngine.InputLegacyModule.dll",
-        "UnityEngine.CoreModule.dll",
-        "UnityEngine.dll",
-    };
+    const size_t asmCount = Il2CppGetAssemblyCount();
+    const void* foundKlass = nullptr;
+    const void* foundImage = nullptr;
 
-    for (const char* image : kImages) {
-        if (!bridge.methodTouchCount) {
-            bridge.methodTouchCount = Il2CppGetMethod(image, "UnityEngine", "Input", "get_touchCount", 0);
-            bridge.codeTouchCount   = bridge.methodTouchCount ? Il2CppMethodGetPointer(bridge.methodTouchCount) : nullptr;
+    // Scan all loaded assemblies dynamically for class UnityEngine.Input
+    for (size_t i = 0; i < asmCount; ++i) {
+        const void* asmPtr = Il2CppGetAssembly(i);
+        if (!asmPtr) continue;
+        const void* image = Il2CppAssemblyGetImage(asmPtr);
+        if (!image) continue;
+
+        const void* klass = Il2CppGetClassType(image, "UnityEngine", "Input");
+        if (klass) {
+            foundKlass = klass;
+            foundImage = image;
+            break;
         }
-        if (!bridge.methodMousePosition) {
-            bridge.methodMousePosition = Il2CppGetMethod(image, "UnityEngine", "Input", "get_mousePosition", 0);
-            bridge.codeMousePosition   = bridge.methodMousePosition ? Il2CppMethodGetPointer(bridge.methodMousePosition) : nullptr;
-        }
-        if (!bridge.methodGetMouseButton) {
-            bridge.methodGetMouseButton = Il2CppGetMethod(image, "UnityEngine", "Input", "GetMouseButton", 1);
-            bridge.codeGetMouseButton   = bridge.methodGetMouseButton ? Il2CppMethodGetPointer(bridge.methodGetMouseButton) : nullptr;
-        }
-        if (bridge.methodMousePosition && bridge.methodTouchCount) break;
     }
 
-    if (bridge.methodMousePosition || bridge.methodTouchCount) {
+    // Fallback: check standard image names explicitly
+    if (!foundKlass) {
+        static const char* kImages[] = {
+            "UnityEngine.InputLegacyModule.dll",
+            "UnityEngine.InputLegacyModule",
+            "UnityEngine.CoreModule.dll",
+            "UnityEngine.CoreModule",
+            "UnityEngine.dll",
+            "UnityEngine"
+        };
+        for (const char* imgName : kImages) {
+            const void* img = Il2CppGetImageByName(imgName);
+            if (!img) continue;
+            const void* klass = Il2CppGetClassType(img, "UnityEngine", "Input");
+            if (klass) {
+                foundKlass = klass;
+                foundImage = img;
+                break;
+            }
+        }
+    }
+
+    if (!foundKlass) {
+        static int s_failLog = 0;
+        if (++s_failLog % 60 == 1) {
+            Logger::Log("ResolveTouchBridge: UnityEngine.Input class not found (assemblies: %zu)", asmCount);
+        }
+        return false;
+    }
+
+    if (il2cpp_class_get_method_from_name) {
+        bridge.methodTouchCount     = il2cpp_class_get_method_from_name((void*)foundKlass, "get_touchCount", 0);
+        bridge.methodMousePosition  = il2cpp_class_get_method_from_name((void*)foundKlass, "get_mousePosition", 0);
+        bridge.methodGetMouseButton = il2cpp_class_get_method_from_name((void*)foundKlass, "GetMouseButton", 1);
+        bridge.methodGetTouch       = il2cpp_class_get_method_from_name((void*)foundKlass, "GetTouch", 1);
+    }
+
+    bridge.codeTouchCount     = bridge.methodTouchCount ? Il2CppMethodGetPointer(bridge.methodTouchCount) : nullptr;
+    bridge.codeMousePosition  = bridge.methodMousePosition ? Il2CppMethodGetPointer(bridge.methodMousePosition) : nullptr;
+    bridge.codeGetMouseButton = bridge.methodGetMouseButton ? Il2CppMethodGetPointer(bridge.methodGetMouseButton) : nullptr;
+    bridge.codeGetTouch       = bridge.methodGetTouch ? Il2CppMethodGetPointer(bridge.methodGetTouch) : nullptr;
+
+    if (bridge.methodTouchCount || bridge.methodMousePosition || bridge.codeTouchCount) {
         bridge.resolved = true;
-        Logger::Log("touch bridge resolved (mousePos=%p touchCount=%p)",
-                    bridge.methodMousePosition, bridge.methodTouchCount);
+        const char* imgName = Il2CppImageGetName(foundImage);
+        Logger::Log("touch bridge resolved in [%s]: class=%p touchCount=%p mousePos=%p getTouch=%p getMouseBtn=%p",
+                    imgName ? imgName : "unknown",
+                    foundKlass,
+                    bridge.methodTouchCount,
+                    bridge.methodMousePosition,
+                    bridge.methodGetTouch,
+                    bridge.methodGetMouseButton);
         return true;
     }
     return false;
 }
 
 int GetSafeTouchCount(const TouchBridge& bridge) {
-    if (!bridge.methodTouchCount) return 0;
-    if (il2cpp_runtime_invoke) {
+    if (bridge.methodTouchCount && il2cpp_runtime_invoke) {
         void* exc = nullptr;
         void* res = il2cpp_runtime_invoke(bridge.methodTouchCount, nullptr, nullptr, &exc);
         if (!exc && res) {
@@ -109,15 +168,16 @@ int GetSafeTouchCount(const TouchBridge& bridge) {
                                                 : (void*)((uintptr_t)res + sizeof(void*) * 2);
             if (unboxed) return *(int*)unboxed;
         }
-    } else if (bridge.codeTouchCount) {
-        return ((int (*)(const void*))bridge.codeTouchCount)(bridge.methodTouchCount);
+    }
+    if (bridge.codeTouchCount) {
+        typedef int (*FnTouchCount)();
+        return ((FnTouchCount)bridge.codeTouchCount)();
     }
     return 0;
 }
 
 bool GetSafeMouseButton(const TouchBridge& bridge, int button) {
-    if (!bridge.methodGetMouseButton) return false;
-    if (il2cpp_runtime_invoke) {
+    if (bridge.methodGetMouseButton && il2cpp_runtime_invoke) {
         void* exc = nullptr;
         void* args[1] = { &button };
         void* res = il2cpp_runtime_invoke(bridge.methodGetMouseButton, nullptr, args, &exc);
@@ -127,12 +187,15 @@ bool GetSafeMouseButton(const TouchBridge& bridge, int button) {
             if (unboxed) return *(bool*)unboxed;
         }
     }
+    if (bridge.codeGetMouseButton) {
+        typedef bool (*FnGetMouseButton)(int);
+        return ((FnGetMouseButton)bridge.codeGetMouseButton)(button);
+    }
     return false;
 }
 
 bool GetSafeMousePosition(const TouchBridge& bridge, UnityVector3& outPos) {
-    if (!bridge.methodMousePosition) return false;
-    if (il2cpp_runtime_invoke) {
+    if (bridge.methodMousePosition && il2cpp_runtime_invoke) {
         void* exc = nullptr;
         void* res = il2cpp_runtime_invoke(bridge.methodMousePosition, nullptr, nullptr, &exc);
         if (!exc && res) {
@@ -140,6 +203,23 @@ bool GetSafeMousePosition(const TouchBridge& bridge, UnityVector3& outPos) {
                                                 : (void*)((uintptr_t)res + sizeof(void*) * 2);
             if (unboxed) {
                 outPos = *(UnityVector3*)unboxed;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool GetSafeTouch(const TouchBridge& bridge, int index, UnityTouch& outTouch) {
+    if (bridge.methodGetTouch && il2cpp_runtime_invoke) {
+        void* exc = nullptr;
+        void* args[1] = { &index };
+        void* res = il2cpp_runtime_invoke(bridge.methodGetTouch, nullptr, args, &exc);
+        if (!exc && res) {
+            void* unboxed = il2cpp_object_unbox ? il2cpp_object_unbox(res)
+                                                : (void*)((uintptr_t)res + sizeof(void*) * 2);
+            if (unboxed) {
+                outTouch = *(UnityTouch*)unboxed;
                 return true;
             }
         }
@@ -171,7 +251,7 @@ void ShutdownImGui() {
 void PumpTouch(ImGuiIO& io) {
     if (!Touch().resolved) {
         static int s_retryFrame = 0;
-        if (++s_retryFrame % 60 == 0) {
+        if (++s_retryFrame % 30 == 1) {
             ResolveTouchBridge();
         }
         if (!Touch().resolved) return;
@@ -182,9 +262,6 @@ void PumpTouch(ImGuiIO& io) {
         Il2CppThreadAttach();
         s_threadAttached = true;
     }
-
-    static bool s_touching = false;
-    static float s_touchStart = 0.0f;
 
     TouchBridge& bridge = Touch();
     int count = GetSafeTouchCount(bridge);
@@ -199,26 +276,49 @@ void PumpTouch(ImGuiIO& io) {
         Dumper::TriggerFullDump();
     }
 
-    if ((count > 0 && count <= 10) || buttonDown) {
-        UnityVector3 pos{};
-        if (GetSafeMousePosition(bridge, pos)) {
-            if (pos.x >= 0.0f && pos.x <= (float)g_GlWidth &&
-                pos.y >= 0.0f && pos.y <= (float)g_GlHeight) {
-                io.MousePos = ImVec2(pos.x, io.DisplaySize.y - pos.y);
-                if (!s_touching) s_touchStart = (float)nowTime;
-                io.MouseDown[0] = true;
-                s_touching = true;
-                return;
-            }
+    bool hasPosition = false;
+    float posX = 0.0f;
+    float posY = 0.0f;
+    bool isDown = false;
+
+    // Route A: Direct Unity Touch struct when screen is touched
+    if (count > 0 && bridge.methodGetTouch) {
+        UnityTouch touch{};
+        if (GetSafeTouch(bridge, 0, touch)) {
+            posX = touch.posX;
+            posY = touch.posY;
+            hasPosition = true;
+            // Phase: 0 = Began, 1 = Moved, 2 = Stationary
+            isDown = (touch.phase == 0 || touch.phase == 1 || touch.phase == 2);
         }
     }
 
-    if (s_touching && (nowTime - s_touchStart) < 0.06f) {
-        io.MouseDown[0] = true;
-        return;
+    // Route B: mousePosition fallback (mouse simulation from touch)
+    if (!hasPosition) {
+        UnityVector3 mousePos{};
+        if (GetSafeMousePosition(bridge, mousePos)) {
+            if (mousePos.x > 0.0f || mousePos.y > 0.0f) {
+                posX = mousePos.x;
+                posY = mousePos.y;
+                hasPosition = true;
+            }
+        }
+        if (count > 0 || buttonDown) {
+            isDown = true;
+        }
     }
-    io.MouseDown[0] = false;
-    s_touching = false;
+
+    if (hasPosition && io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f) {
+        if (posX < 0.0f) posX = 0.0f;
+        if (posX > io.DisplaySize.x) posX = io.DisplaySize.x;
+        if (posY < 0.0f) posY = 0.0f;
+        if (posY > io.DisplaySize.y) posY = io.DisplaySize.y;
+
+        // Invert Y: Unity origin is bottom-left, ImGui origin is top-left
+        io.MousePos = ImVec2(posX, io.DisplaySize.y - posY);
+    }
+
+    io.MouseDown[0] = (isDown && hasPosition);
 }
 
 void RenderFrame() {

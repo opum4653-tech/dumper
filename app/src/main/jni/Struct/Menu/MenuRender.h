@@ -173,8 +173,13 @@ inline void DrawInspector() {
         }
     }
 
-    std::vector<ClassHit> hits;
-    SearchClasses(query, 24, hits);
+    static char s_lastQuery[64] = "";
+    static std::vector<ClassHit> s_cachedHits;
+    if (strcmp(query, s_lastQuery) != 0 || (s_cachedHits.empty() && query[0] && Il2CppIsReady())) {
+        snprintf(s_lastQuery, sizeof(s_lastQuery), "%s", query);
+        SearchClasses(query, 24, s_cachedHits);
+    }
+    const std::vector<ClassHit>& hits = s_cachedHits;
 
     if (hits.empty()) {
         ImGui::TextColored(ImVec4(0.85f, 0.45f, 0.45f, 0.85f), "no class matched");
@@ -272,15 +277,16 @@ inline void DrawHeaderBar(ImDrawList* drawList, ImVec2 windowPos, ImVec2 windowS
     if (g_NinLogoTexture != 0) {
         const float aspect = (g_NinLogoHeight > 0)
             ? ((float)g_NinLogoWidth / (float)g_NinLogoHeight) : 2.5f;
-        const float logoHeight = 92.0f;
+        const float logoHeight = 28.0f;
         const float logoWidth = logoHeight * aspect;
-        const float logoX = windowPos.x + (windowSize.x - logoWidth) * 0.5f;
-        const float logoY = windowPos.y + headerHeight - logoHeight;
-        drawList->PushClipRectFullScreen();
+        const float logoX = windowPos.x + 14.0f;
+        const float logoY = windowPos.y + (headerHeight - logoHeight) * 0.5f;
         drawList->AddImage((ImTextureID)(intptr_t)g_NinLogoTexture,
                            ImVec2(logoX, logoY), ImVec2(logoX + logoWidth, logoY + logoHeight),
                            ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, 255));
-        drawList->PopClipRect();
+    } else {
+        drawList->AddText(ImVec2(windowPos.x + 14.0f, windowPos.y + 12.0f),
+                          IM_COL32(80, 190, 255, 240), "NINMODS LIVE DUMPER");
     }
 
     drawList->AddRectFilled(closePos, ImVec2(closePos.x + 24.0f, closePos.y + 24.0f),
@@ -309,14 +315,14 @@ inline void RenderMainModMenu(bool& menuOpen) {
     MenuTheme::g_position.x = MenuTheme::Clamp(MenuTheme::g_position.x, 0.0f, maxX);
     MenuTheme::g_position.y = MenuTheme::Clamp(MenuTheme::g_position.y, 20.0f, maxY);
 
-    ImGui::SetNextWindowPos(MenuTheme::g_position, ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(MenuTheme::g_width, MenuTheme::g_height), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(MenuTheme::g_position, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(MenuTheme::g_width, MenuTheme::g_height), ImGuiCond_FirstUseEver);
 
     MenuTheme::Push();
 
     if (ImGui::Begin("##NINMODS", &menuOpen,
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
-                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
+                     ImGuiWindowFlags_NoResize)) {
 
         ImGui::PushItemWidth(-1.0f);
 
@@ -329,7 +335,7 @@ inline void RenderMainModMenu(bool& menuOpen) {
 
         const bool overClose = (mouse.x >= closePos.x && mouse.x <= closePos.x + 24.0f &&
                                 mouse.y >= closePos.y && mouse.y <= closePos.y + 24.0f);
-        const bool overHeader = (mouse.y >= windowPos.y - 40.0f && mouse.y <= windowPos.y + kHeaderHeight &&
+        const bool overHeader = (mouse.y >= windowPos.y - 10.0f && mouse.y <= windowPos.y + kHeaderHeight &&
                                  mouse.x >= windowPos.x && mouse.x < closePos.x);
         const bool overBody = (mouse.x >= windowPos.x && mouse.x <= windowPos.x + windowSize.x &&
                                mouse.y >= windowPos.y && mouse.y <= windowPos.y + windowSize.y);
@@ -350,7 +356,12 @@ inline void RenderMainModMenu(bool& menuOpen) {
         if (draggingHeader && ImGui::IsMouseDragging(0, 1.0f)) {
             MenuTheme::g_position.x = MenuTheme::Clamp(MenuTheme::g_position.x + ImGui::GetIO().MouseDelta.x, 0.0f, maxX);
             MenuTheme::g_position.y = MenuTheme::Clamp(MenuTheme::g_position.y + ImGui::GetIO().MouseDelta.y, 20.0f, maxY);
-        } else if (scrollingBody && ImGui::IsMouseDragging(0, 2.0f)) {
+            ImGui::SetWindowPos(MenuTheme::g_position);
+        } else {
+            MenuTheme::g_position = windowPos;
+        }
+
+        if (scrollingBody && ImGui::IsMouseDragging(0, 2.0f)) {
             ImGui::SetScrollY(ImGui::GetScrollY() - ImGui::GetIO().MouseDelta.y);
         }
 
