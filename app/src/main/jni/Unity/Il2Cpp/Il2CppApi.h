@@ -116,6 +116,8 @@ int           Il2CppTypeGetKind(const void* type);
 // ---------------------------------------------------------------------------
 // Convenience lookups used by the overlay's touch bridge
 // ---------------------------------------------------------------------------
+const void*   Il2CppGetMethod(const void* image, const char* namespaze, const char* clazz, const char* name, int argsCount = 0);
+const void*   Il2CppGetMethod(const char* image, const char* namespaze, const char* clazz, const char* name, int argsCount = 0);
 void*         Il2CppGetMethodOffset(const void* image, const char* namespaze, const char* clazz, const char* name, int argsCount = 0);
 void*         Il2CppGetMethodOffset(const char* image, const char* namespaze, const char* clazz, const char* name, int argsCount = 0);
 void*         Il2CppGetFieldOffset(const void* image, const char* namespaze, const char* clazz, const char* name);

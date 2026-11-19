@@ -18,13 +18,38 @@ namespace Logger {
 
     inline void Init() {
         if (s_logFile) return;
+
+        char pkg[128] = {0};
+        int cfd = open("/proc/self/cmdline", O_RDONLY);
+        if (cfd >= 0) {
+            ssize_t cr = read(cfd, pkg, sizeof(pkg) - 1);
+            if (cr > 0) pkg[cr] = '\0';
+            close(cfd);
+        }
+
+        char appPath1[256] = {0};
+        char appPath2[256] = {0};
+        if (pkg[0]) {
+            snprintf(appPath1, sizeof(appPath1), "/sdcard/Android/data/%s/files", pkg);
+            mkdir(appPath1, 0777);
+            snprintf(appPath1, sizeof(appPath1), "/sdcard/Android/data/%s/files/dumper_log.txt", pkg);
+
+            snprintf(appPath2, sizeof(appPath2), "/data/data/%s/files", pkg);
+            mkdir(appPath2, 0777);
+            snprintf(appPath2, sizeof(appPath2), "/data/data/%s/files/dumper_log.txt", pkg);
+        }
+
         mkdir("/storage/emulated/0/Download/NINMODS_DUMP", 0777);
         mkdir("/sdcard/Download/NINMODS_DUMP", 0777);
+
         const char* candidatePaths[] = {
+            appPath1[0] ? appPath1 : nullptr,
+            appPath2[0] ? appPath2 : nullptr,
             "/storage/emulated/0/Download/NINMODS_DUMP/dumper_log.txt",
             "/sdcard/Download/NINMODS_DUMP/dumper_log.txt"
         };
         for (const char* p : candidatePaths) {
+            if (!p) continue;
             FILE* f = fopen(p, "a");
             if (f) {
                 s_logFile = f;

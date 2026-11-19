@@ -3,17 +3,17 @@
 // Target: Android arm64-v8a / armeabi-v7a, NDK r21e, C++17.
 //
 // The overlay renders inside the game's own EGL context by hooking
-// eglSwapBuffers. Touch input is read through UnityEngine.Input rather than by
-// hooking the input pipeline, so nothing in the game's input path is modified.
+// eglSwapBuffers. Touch input is safely read through UnityEngine.Input
+// with runtime invoke protection and multi-finger gestures.
 
 #include <android/log.h>
 #include <unistd.h>
 #include <jni.h>
+#include <pthread.h>
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 #include <atomic>
 #include <mutex>
-#include <thread>
 
 #include <dobby.h>
 #include <Il2Cpp.h>
@@ -47,10 +47,13 @@ struct UnityVector3 {
 namespace {
 
 struct TouchBridge {
-    void* touchCount     = nullptr;
-    void* mousePosition  = nullptr;
-    void* getMouseButton = nullptr;
-    bool  resolved       = false;
+    const void* methodTouchCount     = nullptr;
+    const void* methodMousePosition  = nullptr;
+    const void* methodGetMouseButton = nullptr;
+    void*       codeTouchCount       = nullptr;
+    void*       codeMousePosition    = nullptr;
+    void*       codeGetMouseButton   = nullptr;
+    bool        resolved             = false;
 };
 
 TouchBridge& Touch() {
@@ -63,7 +66,6 @@ bool ResolveTouchBridge() {
     if (bridge.resolved) return true;
     if (!g_Il2CppReady.load()) return false;
 
-    // Attach current thread to IL2CPP runtime before querying symbols
     Il2CppThreadAttach();
 
     static const char* kImages[] = {
@@ -73,23 +75,74 @@ bool ResolveTouchBridge() {
     };
 
     for (const char* image : kImages) {
-        if (!bridge.touchCount) {
-            bridge.touchCount = Il2CppGetMethodOffset(image, "UnityEngine", "Input", "get_touchCount", 0);
+        if (!bridge.methodTouchCount) {
+            bridge.methodTouchCount = Il2CppGetMethod(image, "UnityEngine", "Input", "get_touchCount", 0);
+            bridge.codeTouchCount   = bridge.methodTouchCount ? Il2CppMethodGetPointer(bridge.methodTouchCount) : nullptr;
         }
-        if (!bridge.mousePosition) {
-            bridge.mousePosition = Il2CppGetMethodOffset(image, "UnityEngine", "Input", "get_mousePosition", 0);
+        if (!bridge.methodMousePosition) {
+            bridge.methodMousePosition = Il2CppGetMethod(image, "UnityEngine", "Input", "get_mousePosition", 0);
+            bridge.codeMousePosition   = bridge.methodMousePosition ? Il2CppMethodGetPointer(bridge.methodMousePosition) : nullptr;
         }
-        if (!bridge.getMouseButton) {
-            bridge.getMouseButton = Il2CppGetMethodOffset(image, "UnityEngine", "Input", "GetMouseButton", 1);
+        if (!bridge.methodGetMouseButton) {
+            bridge.methodGetMouseButton = Il2CppGetMethod(image, "UnityEngine", "Input", "GetMouseButton", 1);
+            bridge.codeGetMouseButton   = bridge.methodGetMouseButton ? Il2CppMethodGetPointer(bridge.methodGetMouseButton) : nullptr;
         }
-        if (bridge.mousePosition && bridge.touchCount) break;
+        if (bridge.methodMousePosition && bridge.methodTouchCount) break;
     }
 
-    if (bridge.mousePosition || bridge.touchCount) {
+    if (bridge.methodMousePosition || bridge.methodTouchCount) {
         bridge.resolved = true;
-        Logger::Log("touch bridge resolved through il2cpp (mousePos=%p touchCount=%p)",
-                    bridge.mousePosition, bridge.touchCount);
+        Logger::Log("touch bridge resolved (mousePos=%p touchCount=%p)",
+                    bridge.methodMousePosition, bridge.methodTouchCount);
         return true;
+    }
+    return false;
+}
+
+int GetSafeTouchCount(const TouchBridge& bridge) {
+    if (!bridge.methodTouchCount) return 0;
+    if (il2cpp_runtime_invoke) {
+        void* exc = nullptr;
+        void* res = il2cpp_runtime_invoke(bridge.methodTouchCount, nullptr, nullptr, &exc);
+        if (!exc && res) {
+            void* unboxed = il2cpp_object_unbox ? il2cpp_object_unbox(res)
+                                                : (void*)((uintptr_t)res + sizeof(void*) * 2);
+            if (unboxed) return *(int*)unboxed;
+        }
+    } else if (bridge.codeTouchCount) {
+        return ((int (*)(const void*))bridge.codeTouchCount)(bridge.methodTouchCount);
+    }
+    return 0;
+}
+
+bool GetSafeMouseButton(const TouchBridge& bridge, int button) {
+    if (!bridge.methodGetMouseButton) return false;
+    if (il2cpp_runtime_invoke) {
+        void* exc = nullptr;
+        void* args[1] = { &button };
+        void* res = il2cpp_runtime_invoke(bridge.methodGetMouseButton, nullptr, args, &exc);
+        if (!exc && res) {
+            void* unboxed = il2cpp_object_unbox ? il2cpp_object_unbox(res)
+                                                : (void*)((uintptr_t)res + sizeof(void*) * 2);
+            if (unboxed) return *(bool*)unboxed;
+        }
+    }
+    return false;
+}
+
+bool GetSafeMousePosition(const TouchBridge& bridge, UnityVector3& outPos) {
+    if (!bridge.methodMousePosition) return false;
+    if (il2cpp_runtime_invoke) {
+        void* exc = nullptr;
+        void* res = il2cpp_runtime_invoke(bridge.methodMousePosition, nullptr, nullptr, &exc);
+        if (!exc && res) {
+            void* unboxed = il2cpp_object_unbox ? il2cpp_object_unbox(res)
+                                                : (void*)((uintptr_t)res + sizeof(void*) * 2);
+            if (unboxed) {
+                outPos = *(UnityVector3*)unboxed;
+                return true;
+            }
+        }
     }
     return false;
 }
@@ -134,24 +187,25 @@ void PumpTouch(ImGuiIO& io) {
     static float s_touchStart = 0.0f;
 
     TouchBridge& bridge = Touch();
+    int count = GetSafeTouchCount(bridge);
+    bool buttonDown = GetSafeMouseButton(bridge, 0);
 
-    int count = 0;
-    if (bridge.touchCount) {
-        count = ((int (*)())bridge.touchCount)();
-    }
-
-    bool buttonDown = false;
-    if (bridge.getMouseButton) {
-        buttonDown = ((bool (*)(int))bridge.getMouseButton)(0);
+    // Multi-touch Gesture (OB55 pattern): 3-finger or 4-finger tap triggers dump automatically!
+    static double s_lastMultiTap = 0.0;
+    double nowTime = ImGui::GetTime();
+    if (count >= 3 && (nowTime - s_lastMultiTap > 3.0)) {
+        s_lastMultiTap = nowTime;
+        Logger::Log("Multi-finger gesture (count=%d) -> triggering full dump!", count);
+        Dumper::TriggerFullDump();
     }
 
     if ((count > 0 && count <= 10) || buttonDown) {
-        if (bridge.mousePosition) {
-            const UnityVector3 pos = ((UnityVector3 (*)())bridge.mousePosition)();
+        UnityVector3 pos{};
+        if (GetSafeMousePosition(bridge, pos)) {
             if (pos.x >= 0.0f && pos.x <= (float)g_GlWidth &&
                 pos.y >= 0.0f && pos.y <= (float)g_GlHeight) {
                 io.MousePos = ImVec2(pos.x, io.DisplaySize.y - pos.y);
-                if (!s_touching) s_touchStart = ImGui::GetTime();
+                if (!s_touching) s_touchStart = (float)nowTime;
                 io.MouseDown[0] = true;
                 s_touching = true;
                 return;
@@ -159,7 +213,7 @@ void PumpTouch(ImGuiIO& io) {
         }
     }
 
-    if (s_touching && (ImGui::GetTime() - s_touchStart) < 0.06f) {
+    if (s_touching && (nowTime - s_touchStart) < 0.06f) {
         io.MouseDown[0] = true;
         return;
     }
@@ -197,8 +251,6 @@ EGLBoolean HookedSwapBuffers(EGLDisplay display, EGLSurface surface) {
 
     std::lock_guard<std::mutex> lock(g_renderMutex);
 
-    // A context switch invalidates every GL object, so the ImGui backend and the
-    // logo texture are rebuilt for the new context.
     static EGLContext s_lastContext = EGL_NO_CONTEXT;
     if (s_lastContext != context) {
         ShutdownImGui();
@@ -235,50 +287,80 @@ bool InstallSwapBuffersHook() {
 
     if (DobbyHook(target, (void*)HookedSwapBuffers, (void**)&g_originalSwapBuffers) != 0) return false;
 
-    Logger::Log("eglSwapBuffers hooked at %p", target);
+    Logger::Log("eglSwapBuffers hooked successfully at %p", target);
     return true;
 }
 
-void Watcher() {
-    Logger::Log("watcher started (pid %d)", (int)getpid());
+void* Watcher(void* arg) {
+    (void)arg;
+    Logger::Init();
+    Logger::Log("NINMODS Watcher started (pid %d)", (int)getpid());
 
-    // 1. Delayed start: Wait 4 seconds for Android activity, surface creation, and engine loader (OB55 pattern)
-    sleep(4);
+    // 1. Initial grace period: wait 6 seconds for Activity startup and initial load
+    sleep(6);
 
-    // 2. Poll for libil2cpp.so to be fully mapped and initialized
-    for (int tick = 0; tick < 180; ++tick) {
+    // 2. Poll for libil2cpp.so to be fully mapped in /proc/self/maps naturally (OB55 pattern)
+    uintptr_t il2cpp_base = 0;
+    for (int i = 0; i < 30 && !il2cpp_base; ++i) {
+        il2cpp_base = memutils::GetModuleBase("libil2cpp.so");
+        if (!il2cpp_base) sleep(2);
+    }
+
+    if (!il2cpp_base) {
+        Logger::Log("watcher: libil2cpp.so not found after 66s; aborting");
+        return nullptr;
+    }
+    Logger::Log("watcher: libil2cpp.so mapped at 0x%lx", (unsigned long)il2cpp_base);
+
+    // 3. Wait for Unity to call il2cpp_init() and load assemblies
+    for (int tick = 0; tick < 120; ++tick) {
         if (!g_Il2CppReady.load()) {
             EnsureIl2CppReady();
         }
 
-        // 3. Only install eglSwapBuffers hook AFTER runtime is fully ready and stable
+        // 4. Install eglSwapBuffers hook only when runtime and assemblies are verified ready
         if (g_Il2CppReady.load() && !g_EglHooked.load()) {
             if (InstallSwapBuffersHook()) {
                 g_EglHooked.store(true);
-                Logger::Log("watcher: render hook and runtime both ready");
-                return;
+                Logger::Log("watcher: render hook installed, overlay active");
+                return nullptr;
             }
         }
         sleep(1);
     }
-    Logger::Log("watcher: gave up after 180s (egl=%d il2cpp=%d)",
+
+    Logger::Log("watcher: timed out (egl=%d il2cpp=%d)",
                 (int)g_EglHooked.load(), (int)g_Il2CppReady.load());
+    return nullptr;
 }
 
 } // namespace
 
-__attribute__((constructor)) static void NinModsConstructor() {
-    static std::atomic<bool> s_started{false};
-    if (s_started.exchange(true)) return;
-
-    Logger::Init();
-    Logger::Log("NINMODS loaded, pid %d", (int)getpid());
-    std::thread(Watcher).detach();
-}
+JavaVM* g_jvm = nullptr;
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    (void)vm;
     (void)reserved;
-    NinModsConstructor();
+    g_jvm = vm;
+
+    static std::atomic<bool> s_started{false};
+    if (!s_started.exchange(true)) {
+        pthread_t t;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        pthread_create(&t, &attr, Watcher, nullptr);
+        pthread_attr_destroy(&attr);
+    }
     return JNI_VERSION_1_6;
+}
+
+// Optional JNI touch bridge: if invoked from Java onTouchEvent
+extern "C" JNIEXPORT void JNICALL
+Java_com_ninmods_dumper_MenuService_onTouch(JNIEnv* env, jclass clazz, jint action, jfloat x, jfloat y) {
+    (void)env;
+    (void)clazz;
+    ImGuiIO& io = ImGui::GetIO();
+    io.MousePos = ImVec2(x, y);
+    if (action == 0) io.MouseDown[0] = true;
+    else if (action == 1) io.MouseDown[0] = false;
 }

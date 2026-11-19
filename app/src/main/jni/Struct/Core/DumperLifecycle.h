@@ -34,7 +34,8 @@ inline bool TryInitIl2Cpp() {
 
     Il2CppAttach();
     MetadataParser::Located loc;
-    const bool apiReady = Il2CppIsReady();
+    const size_t asmCount = Il2CppGetAssemblyCount();
+    const bool apiReady = Il2CppIsReady() && (asmCount > 0);
     const bool metadataReady = !apiReady && MetadataParser::Locate(loc);
     if (!apiReady && !metadataReady) {
         return false;

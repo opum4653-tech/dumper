@@ -139,13 +139,7 @@ void Il2CppAttach() {
 
     void* handle = xdl_open("libil2cpp.so", 0);
     if (!handle) {
-        // The module is normally already mapped into the game process. A forced
-        // load is a last resort and is only tried when the plain open failed.
-        handle = xdl_open("libil2cpp.so", XDL_TRY_FORCE_LOAD);
-    }
-    if (!handle) {
-        __android_log_print(ANDROID_LOG_ERROR, NINMODS_TAG,
-                            "libil2cpp.so not mapped; attach skipped");
+        // Never force-load libil2cpp.so before the game engine maps it naturally.
         return;
     }
 
@@ -753,6 +747,20 @@ int Il2CppTypeGetKind(const void* type) {
 // ---------------------------------------------------------------------------
 // Convenience lookups
 // ---------------------------------------------------------------------------
+const void* Il2CppGetMethod(const void* image, const char* namespaze, const char* clazz,
+                            const char* name, int argsCount) {
+    const void* klass = Il2CppGetClassType(image, namespaze, clazz);
+    if (!klass || !name || !il2cpp_class_get_method_from_name) return nullptr;
+    return il2cpp_class_get_method_from_name((void*)klass, name, argsCount);
+}
+
+const void* Il2CppGetMethod(const char* image, const char* namespaze, const char* clazz,
+                            const char* name, int argsCount) {
+    const void* img = Il2CppGetImageByName(image);
+    if (!img) return nullptr;
+    return Il2CppGetMethod(img, namespaze, clazz, name, argsCount);
+}
+
 void* Il2CppGetMethodOffset(const void* image, const char* namespaze, const char* clazz,
                             const char* name, int argsCount) {
     const void* klass = Il2CppGetClassType(image, namespaze, clazz);

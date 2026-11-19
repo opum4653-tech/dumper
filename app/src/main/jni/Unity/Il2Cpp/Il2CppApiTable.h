@@ -85,4 +85,6 @@
     X(void *,            il2cpp_object_new,                 (const void *klass))         \
     X(void *,            il2cpp_array_new,                  (void *elementTypeInfo, size_t length)) \
     X(void *,            il2cpp_string_new,                 (const char *str))           \
-    X(void *,            il2cpp_string_new_utf16,           (const uint16_t *text, int32_t len))
+    X(void *,            il2cpp_string_new_utf16,           (const uint16_t *text, int32_t len)) \
+    X(void *,            il2cpp_runtime_invoke,             (const void *method, void *obj, void **params, void **exc)) \
+    X(void *,            il2cpp_object_unbox,               (void *obj))
