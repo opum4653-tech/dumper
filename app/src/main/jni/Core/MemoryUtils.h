@@ -41,21 +41,11 @@ inline bool GetModuleRange(const char* moduleName, uintptr_t* outBase, size_t* o
     uintptr_t highest = 0;
 
     while (fgets(line, sizeof(line), fp)) {
+        if (!strstr(line, moduleName)) continue;
+
         uintptr_t start = 0, end = 0;
         char perms[5] = {0};
-        if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) < 3) continue;
-
-        const char* p = line;
-        int fields = 0;
-        while (*p && fields < 5) {
-            while (*p == ' ' || *p == '\t') ++p;
-            while (*p && *p != ' ' && *p != '\t' && *p != '\n') ++p;
-            ++fields;
-        }
-        while (*p == ' ' || *p == '\t') ++p;
-        if (!*p || *p == '\n') continue;
-
-        if (!memutils::BasenameEquals(p, moduleName)) continue;
+        if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) < 2) continue;
 
         if (lowest == 0 || start < lowest) lowest = start;
         if (end > highest) highest = end;

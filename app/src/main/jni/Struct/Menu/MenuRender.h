@@ -262,167 +262,101 @@ inline void DrawInspector() {
 }
 
 // ---------------------------------------------------------------------------
-// Chrome
+// Official ImGui In-Game Menu
 // ---------------------------------------------------------------------------
-inline void DrawHeaderBar(ImDrawList* drawList, ImVec2 windowPos, ImVec2 windowSize,
-                          ImVec2 closePos, bool overClose, float headerHeight) {
-    drawList->AddRectFilled(windowPos,
-                            ImVec2(windowPos.x + windowSize.x, windowPos.y + headerHeight),
-                            IM_COL32(14, 18, 26, 250), 10.0f, ImDrawFlags_RoundCornersTop);
-    drawList->AddLine(ImVec2(windowPos.x, windowPos.y + headerHeight),
-                      ImVec2(windowPos.x + windowSize.x, windowPos.y + headerHeight),
-                      IM_COL32(60, 90, 140, 180), 1.0f);
-
-    if (g_NinLogoTexture == 0) LoadNinLogoTexture();
-    if (g_NinLogoTexture != 0) {
-        const float aspect = (g_NinLogoHeight > 0)
-            ? ((float)g_NinLogoWidth / (float)g_NinLogoHeight) : 2.5f;
-        const float logoHeight = 28.0f;
-        const float logoWidth = logoHeight * aspect;
-        const float logoX = windowPos.x + 14.0f;
-        const float logoY = windowPos.y + (headerHeight - logoHeight) * 0.5f;
-        drawList->AddImage((ImTextureID)(intptr_t)g_NinLogoTexture,
-                           ImVec2(logoX, logoY), ImVec2(logoX + logoWidth, logoY + logoHeight),
-                           ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, 255));
-    } else {
-        drawList->AddText(ImVec2(windowPos.x + 14.0f, windowPos.y + 12.0f),
-                          IM_COL32(80, 190, 255, 240), "NINMODS LIVE DUMPER");
-    }
-
-    drawList->AddRectFilled(closePos, ImVec2(closePos.x + 24.0f, closePos.y + 24.0f),
-                            overClose ? IM_COL32(220, 50, 60, 200) : IM_COL32(50, 65, 88, 140), 6.0f);
-    drawList->AddLine(ImVec2(closePos.x + 7.0f,  closePos.y + 7.0f),
-                      ImVec2(closePos.x + 17.0f, closePos.y + 17.0f),
-                      IM_COL32(255, 255, 255, 240), 2.0f);
-    drawList->AddLine(ImVec2(closePos.x + 17.0f, closePos.y + 7.0f),
-                      ImVec2(closePos.x + 7.0f,  closePos.y + 17.0f),
-                      IM_COL32(255, 255, 255, 240), 2.0f);
-}
-
 inline void RenderMainModMenu(bool& menuOpen) {
     const float screenWidth = (ImGui::GetIO().DisplaySize.x > 0.0f)
         ? ImGui::GetIO().DisplaySize.x : (float)g_GlWidth;
     const float screenHeight = (ImGui::GetIO().DisplaySize.y > 0.0f)
         ? ImGui::GetIO().DisplaySize.y : (float)g_GlHeight;
 
-    MenuTheme::g_height = (screenHeight > 0.0f) ? (screenHeight * 0.74f) : 500.0f;
-    if (MenuTheme::g_height < 380.0f) MenuTheme::g_height = 380.0f;
-    MenuTheme::g_width = (screenWidth > 460.0f) ? 440.0f : (screenWidth - 20.0f);
-    if (MenuTheme::g_width < 260.0f) MenuTheme::g_width = 260.0f;
+    float defaultW = (screenWidth > 520.0f) ? 480.0f : (screenWidth - 20.0f);
+    float defaultH = (screenHeight > 560.0f) ? 520.0f : (screenHeight - 30.0f);
 
-    const float maxX = (screenWidth > MenuTheme::g_width) ? (screenWidth - MenuTheme::g_width) : 0.0f;
-    const float maxY = (screenHeight > MenuTheme::g_height) ? (screenHeight - MenuTheme::g_height) : 0.0f;
-    MenuTheme::g_position.x = MenuTheme::Clamp(MenuTheme::g_position.x, 0.0f, maxX);
-    MenuTheme::g_position.y = MenuTheme::Clamp(MenuTheme::g_position.y, 20.0f, maxY);
-
-    ImGui::SetNextWindowPos(MenuTheme::g_position, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(MenuTheme::g_width, MenuTheme::g_height), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(defaultW, defaultH), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(30.0f, 30.0f), ImGuiCond_FirstUseEver);
 
     MenuTheme::Push();
 
-    if (ImGui::Begin("##NINMODS", &menuOpen,
-                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
-                     ImGuiWindowFlags_NoResize)) {
-
-        ImGui::PushItemWidth(-1.0f);
-
-        constexpr float kHeaderHeight = 44.0f;
-        const ImVec2 windowPos  = ImGui::GetWindowPos();
-        const ImVec2 windowSize = ImGui::GetWindowSize();
-        const ImVec2 mouse      = ImGui::GetIO().MousePos;
-        const ImVec2 closePos(windowPos.x + windowSize.x - 34.0f,
-                              windowPos.y + (kHeaderHeight - 24.0f) * 0.5f);
-
-        const bool overClose = (mouse.x >= closePos.x && mouse.x <= closePos.x + 24.0f &&
-                                mouse.y >= closePos.y && mouse.y <= closePos.y + 24.0f);
-        const bool overHeader = (mouse.y >= windowPos.y - 10.0f && mouse.y <= windowPos.y + kHeaderHeight &&
-                                 mouse.x >= windowPos.x && mouse.x < closePos.x);
-        const bool overBody = (mouse.x >= windowPos.x && mouse.x <= windowPos.x + windowSize.x &&
-                               mouse.y >= windowPos.y && mouse.y <= windowPos.y + windowSize.y);
-
-        if (ImGui::IsMouseClicked(0) && overClose) menuOpen = false;
-
-        static bool draggingHeader = false;
-        static bool scrollingBody = false;
-        if (ImGui::IsMouseClicked(0)) {
-            draggingHeader = overHeader;
-            scrollingBody = overBody && !overHeader;
-        }
-        if (ImGui::IsMouseReleased(0)) {
-            draggingHeader = false;
-            scrollingBody = false;
-        }
-
-        if (draggingHeader && ImGui::IsMouseDragging(0, 1.0f)) {
-            MenuTheme::g_position.x = MenuTheme::Clamp(MenuTheme::g_position.x + ImGui::GetIO().MouseDelta.x, 0.0f, maxX);
-            MenuTheme::g_position.y = MenuTheme::Clamp(MenuTheme::g_position.y + ImGui::GetIO().MouseDelta.y, 20.0f, maxY);
-            ImGui::SetWindowPos(MenuTheme::g_position);
-        } else {
-            MenuTheme::g_position = windowPos;
-        }
-
-        if (scrollingBody && ImGui::IsMouseDragging(0, 2.0f)) {
-            ImGui::SetScrollY(ImGui::GetScrollY() - ImGui::GetIO().MouseDelta.y);
-        }
-
-        ImDrawList* drawList = ImGui::GetWindowDrawList();
-
-        if (g_NinLogoTexture == 0) LoadNinLogoTexture();
-        if (g_NinLogoTexture != 0) {
-            const float bodyWidth = windowSize.x;
-            const float bodyHeight = windowSize.y - kHeaderHeight;
-            const float aspect = (g_NinLogoHeight > 0)
-                ? ((float)g_NinLogoWidth / (float)g_NinLogoHeight) : 1.0f;
-            const float logoWidth = bodyWidth * 0.88f;
-            const float logoHeight = logoWidth / aspect;
-            const float logoX = windowPos.x + (bodyWidth - logoWidth) * 0.5f;
-            const float logoY = windowPos.y + kHeaderHeight + (bodyHeight - logoHeight) * 0.5f;
-
-            drawList->PushClipRect(ImVec2(windowPos.x, windowPos.y + kHeaderHeight),
-                                   ImVec2(windowPos.x + windowSize.x, windowPos.y + windowSize.y), true);
-            drawList->AddImage((ImTextureID)(intptr_t)g_NinLogoTexture,
-                               ImVec2(logoX, logoY), ImVec2(logoX + logoWidth, logoY + logoHeight),
-                               ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, 55));
-            drawList->PopClipRect();
-        }
-
-        ImGui::SetCursorPosY(kHeaderHeight + 6.0f);
+    // Standard Official ImGui Window (Official Title Bar, Native Close Button, Native Dragging)
+    if (ImGui::Begin("NINMODS Live IL2CPP Dumper", &menuOpen, ImGuiWindowFlags_NoCollapse)) {
 
         static const std::string s_package = Dumper::TargetPackage();
-        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.00f, 1.00f), "IL2CPP LIVE DUMPER");
-        ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.95f, 0.90f), "%s  (pid %d)",
-                           s_package.c_str(), (int)getpid());
-        if (Il2CppIsReady()) {
-            ImGui::TextColored(ImVec4(0.75f, 0.80f, 0.85f, 0.90f),
-                               "base 0x%lx   assemblies %zu",
-                               (unsigned long)Il2CppGetBase(),
-                               Il2CppGetAssemblyCount());
-        } else {
-            ImGui::TextColored(ImVec4(0.95f, 0.60f, 0.30f, 1.00f), "IL2CPP runtime initializing...");
+
+        // Standard Official TabBar
+        if (ImGui::BeginTabBar("DumperTabBar", ImGuiTabBarFlags_None)) {
+
+            // TAB 1: DUMP ENGINE
+            if (ImGui::BeginTabItem("Dump Engine")) {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.00f, 1.00f), "LIVE RUNTIME STATUS");
+                ImGui::Text("Package : %s", s_package.c_str());
+                ImGui::Text("PID     : %d", (int)getpid());
+
+                if (Il2CppIsReady()) {
+                    ImGui::TextColored(ImVec4(0.40f, 1.00f, 0.60f, 1.00f),
+                                       "Base    : 0x%lx  (%zu assemblies)",
+                                       (unsigned long)Il2CppGetBase(),
+                                       Il2CppGetAssemblyCount());
+                } else {
+                    ImGui::TextColored(ImVec4(1.00f, 0.60f, 0.20f, 1.00f),
+                                       "Base    : Waiting for IL2CPP runtime...");
+                }
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.30f, 1.00f), "DUMP ACTIONS");
+                DrawDumpControls();
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                ImGui::TextColored(ImVec4(0.70f, 0.70f, 0.70f, 1.00f), "OUTPUT DIRECTORY:");
+                char outDir[192] = {0};
+                Dumper::ResolveOutputDir(outDir, sizeof(outDir));
+                ImGui::TextWrapped("%s", outDir[0] ? outDir : "/sdcard/Download/NINMODS_DUMP");
+
+                ImGui::EndTabItem();
+            }
+
+            // TAB 2: LIVE INSPECTOR
+            if (ImGui::BeginTabItem("Live Inspector")) {
+                ImGui::Spacing();
+                DrawInspector();
+                ImGui::EndTabItem();
+            }
+
+            // TAB 3: RUNTIME INFO
+            if (ImGui::BeginTabItem("Info")) {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.00f, 1.00f), "NINMODS Live IL2CPP Dumper v2.0");
+                ImGui::Text("Architecture : %s",
+#if defined(__aarch64__)
+                    "ARM64 (arm64-v8a)"
+#elif defined(__arm__)
+                    "ARM32 (armeabi-v7a)"
+#else
+                    "x86/x64"
+#endif
+                );
+                ImGui::Text("Hook Method  : eglSwapBuffers");
+                ImGui::Text("Touch Input  : UnityEngine.Input (Native Multi-touch)");
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::TextWrapped("Offsets dumped by this tool are 100%% real in-memory RVAs and struct field layouts directly read from the live game runtime.");
+                ImGui::Spacing();
+                if (ImGui::Button("CLOSE MENU", ImVec2(-1, 38.0f))) {
+                    menuOpen = false;
+                }
+                ImGui::EndTabItem();
+            }
+
+            ImGui::EndTabBar();
         }
-        ImGui::Separator();
-
-        ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.30f, 1.00f), "DUMP ENGINE");
-        DrawDumpControls();
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.40f, 0.85f, 1.00f, 1.00f), "LIVE INSPECTOR");
-        DrawInspector();
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.20f, 0.25f, 0.35f, 0.85f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.38f, 0.52f, 0.95f));
-        if (ImGui::Button("HIDE", ImVec2(-1, 36.0f))) menuOpen = false;
-        ImGui::PopStyleColor(2);
-
-        DrawHeaderBar(drawList, windowPos, windowSize, closePos, overClose, kHeaderHeight);
-        ImGui::PopItemWidth();
     }
     ImGui::End();
 
