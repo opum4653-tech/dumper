@@ -27,8 +27,6 @@ inline bool BasenameEquals(const char* path, const char* moduleName) {
     return strcmp(base, moduleName) == 0;
 }
 
-} // namespace memutils
-
 // Mapped range (lowest address and total mapped size) of the named module.
 inline bool GetModuleRange(const char* moduleName, uintptr_t* outBase, size_t* outSize) {
     if (!moduleName || moduleName[0] == '\0') return false;
@@ -77,5 +75,11 @@ inline uintptr_t get_module_base(pid_t pid, const char* moduleName) {
     if (pid != getpid()) return 0;
     return GetModuleBase(moduleName);
 }
+
+} // namespace memutils
+
+using memutils::GetModuleRange;
+using memutils::GetModuleBase;
+using memutils::get_module_base;
 
 #endif // NINMODS_CORE_MEMORYUTILS_H
